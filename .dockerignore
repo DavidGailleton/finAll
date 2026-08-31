@@ -1,0 +1,38 @@
+# Rust build output
+target/
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Operating-system files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# JavaScript dependencies and test output
+node_modules/
+end2end/node_modules/
+end2end/test-results/
+end2end/playwright-report/
+
+# Local database data
+postgres-data/
+data/
+
+# Documentation that is not required to compile
+CHANGELOG.md

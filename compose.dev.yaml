@@ -1,0 +1,49 @@
+services:
+  db:
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+      args:
+        CARGO_LEPTOS_VERSION: ${CARGO_LEPTOS_VERSION:-0.3.6}
+    command: cargo leptos watch
+    environment:
+      DATABASE_URL: >-
+        postgres://${POSTGRES_USER:-my_app}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-my_app}
+      LEPTOS_SITE_ADDR: 0.0.0.0:3000
+      LEPTOS_RELOAD_PORT: 3001
+      LEPTOS_ENV: DEV
+      RUST_LOG: ${RUST_LOG:-debug}
+    ports:
+      - "127.0.0.1:${APP_PORT:-3000}:3000"
+      - "127.0.0.1:${RELOAD_PORT:-3001}:3001"
+    volumes:
+      - .:/app
+      - cargo_registry:/usr/local/cargo/registry
+      - cargo_git:/usr/local/cargo/git
+      - cargo_target:/app/target
+      - cargo_leptos_cache:/root/.cache/cargo-leptos
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "curl",
+          "--fail",
+          "--silent",
+          "http://127.0.0.1:3000/health"
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    read_only: false
+    restart: "no"
+
+volumes:
+  cargo_registry:
+  cargo_git:
+  cargo_target:
+  cargo_leptos_cache:
