@@ -4,10 +4,11 @@
 # Build stage
 ########################################
 
-FROM rust:1.92.0-trixie AS builder
+FROM rust:1.98.0-trixie AS builder
 
 ARG APP_NAME=my-app
 ARG CARGO_LEPTOS_VERSION=0.3.6
+ARG SQLX_CLI_VERSION=0.9.0
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -27,6 +28,13 @@ RUN curl \
     | sh
 
 RUN rustup target add wasm32-unknown-unknown
+
+# Install sqlx-cli so the runtime image can run migrations (`sqlx migrate run`).
+RUN cargo install sqlx-cli \
+      --version "${SQLX_CLI_VERSION}" \
+      --locked \
+      --no-default-features \
+      --features rustls,postgres
 
 WORKDIR /app
 
@@ -69,6 +77,8 @@ WORKDIR /app
 
 COPY --from=builder --chown=app:app /out/app /app/app
 COPY --from=builder --chown=app:app /out/site /app/site
+COPY --from=builder /usr/local/cargo/bin/sqlx /usr/local/bin/sqlx
+COPY --chown=app:app migrations /app/migrations
 
 USER app
 

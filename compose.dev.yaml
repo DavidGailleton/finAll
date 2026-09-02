@@ -9,6 +9,7 @@ services:
       dockerfile: Dockerfile.dev
       args:
         CARGO_LEPTOS_VERSION: ${CARGO_LEPTOS_VERSION:-0.3.6}
+        SQLX_CLI_VERSION: ${SQLX_CLI_VERSION:-0.9.0}
     command: cargo leptos watch
     environment:
       DATABASE_URL: >-
