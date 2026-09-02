@@ -22,7 +22,7 @@ SQLX             := $(DEV_EXEC_AS_USER) sqlx
 
 .DEFAULT_GOAL := help
 .PHONY: help dev prod down prod-down logs \
-        migrate-new migrate migrate-revert migrate-info \
+        migrate-new migrate migrate-revert migrate-info sqlx-prepare \
         psql check lint fmt test
 
 help: ## Show available targets
@@ -60,6 +60,9 @@ migrate-revert: ## Revert the last applied migration on the dev database
 
 migrate-info: ## Show migration status for the dev database
 	$(SQLX) migrate info
+
+sqlx-prepare: ## Refresh the .sqlx offline query cache (needs the dev DB running)
+	$(DEV_EXEC_AS_USER) cargo sqlx prepare -- --features ssr
 
 # --- Dev tooling -------------------------------------------------------
 
