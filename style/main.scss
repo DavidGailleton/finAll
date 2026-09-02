@@ -2,3 +2,67 @@ body {
 	font-family: sans-serif;
 	text-align: center;
 }
+
+.auth-card {
+	max-width: 22rem;
+	margin: 3rem auto;
+	padding: 1.5rem;
+	border: 1px solid #ccc;
+	border-radius: 8px;
+	text-align: left;
+}
+
+.auth-card h1 {
+	margin-top: 0;
+	font-size: 1.25rem;
+}
+
+.auth-card form {
+	display: flex;
+	flex-direction: column;
+	gap: 0.75rem;
+}
+
+.field {
+	display: flex;
+	flex-direction: column;
+	gap: 0.25rem;
+}
+
+.field label {
+	font-size: 0.875rem;
+	font-weight: 600;
+}
+
+.field input {
+	padding: 0.5rem;
+	font: inherit;
+	border: 1px solid #999;
+	border-radius: 4px;
+}
+
+.btn {
+	padding: 0.5rem 1rem;
+	font: inherit;
+	cursor: pointer;
+	border: 1px solid transparent;
+	border-radius: 4px;
+	background: #2563eb;
+	color: #fff;
+}
+
+.btn:disabled {
+	opacity: 0.6;
+	cursor: not-allowed;
+}
+
+.form-error {
+	margin: 0;
+	color: #b91c1c;
+	font-size: 0.875rem;
+}
+
+.auth-alt {
+	margin-top: 1rem;
+	font-size: 0.875rem;
+}

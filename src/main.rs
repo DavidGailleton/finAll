@@ -13,11 +13,24 @@ async fn main() {
     // Generate the list of routes in your Leptos App
     let routes = generate_route_list(App);
 
+    // Open the database pool once and hand it to server functions via context.
+    let pool = fin_all::server::db::create_pool()
+        .await
+        .expect("could not connect to the database (check DATABASE_URL)");
+
     let app = Router::new()
-        .leptos_routes(&leptos_options, routes, {
-            let leptos_options = leptos_options.clone();
-            move || shell(leptos_options.clone())
-        })
+        .leptos_routes_with_context(
+            &leptos_options,
+            routes,
+            {
+                let pool = pool.clone();
+                move || provide_context(pool.clone())
+            },
+            {
+                let leptos_options = leptos_options.clone();
+                move || shell(leptos_options.clone())
+            },
+        )
         .fallback(leptos_axum::file_and_error_handler(shell))
         .with_state(leptos_options);
 

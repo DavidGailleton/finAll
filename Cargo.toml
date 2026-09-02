@@ -27,6 +27,15 @@ sqlx = { version = "0.9", optional = true, default-features = false, features = 
   "json",
 ] }
 
+# Shared: DTOs crossing the server-function boundary.
+serde = { version = "1", features = ["derive"] }
+
+# Server-only: password hashing, session-token hashing/RNG, and the auth error type.
+argon2 = { version = "0.6", optional = true }
+sha2 = { version = "0.11", optional = true }
+getrandom = { version = "0.4", optional = true }
+thiserror = { version = "2", optional = true }
+
 [features]
 hydrate = ["leptos/hydrate", "dep:console_error_panic_hook", "dep:wasm-bindgen"]
 ssr = [
@@ -34,6 +43,10 @@ ssr = [
   "dep:tokio",
   "dep:leptos_axum",
   "dep:sqlx",
+  "dep:argon2",
+  "dep:sha2",
+  "dep:getrandom",
+  "dep:thiserror",
   "leptos/ssr",
   "leptos_meta/ssr",
   "leptos_router/ssr",

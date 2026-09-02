@@ -1,4 +1,10 @@
 pub mod app;
+pub mod auth;
+pub mod components;
+pub mod pages;
+
+#[cfg(feature = "ssr")]
+pub mod server;
 
 #[cfg(feature = "hydrate")]
 #[wasm_bindgen::prelude::wasm_bindgen]
