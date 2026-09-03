@@ -13,3 +13,14 @@ pub async fn create_pool() -> Result<PgPool, sqlx::Error> {
 
     PgPoolOptions::new().connect(&url).await
 }
+
+/// Apply any pending migrations from `./migrations`, embedded into the binary at
+/// compile time by `sqlx::migrate!`.
+///
+/// Called from `main` at startup only when opted in via the `RUN_MIGRATIONS`
+/// environment variable; otherwise migrations are applied out of band with
+/// `sqlx migrate run`. `sqlx` acquires a Postgres advisory lock for the
+/// duration, so this is safe to run on every boot.
+pub async fn run_pending_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
+    sqlx::migrate!().run(pool).await
+}

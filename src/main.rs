@@ -18,6 +18,19 @@ async fn main() {
         .await
         .expect("could not connect to the database (check DATABASE_URL)");
 
+    // Apply pending migrations before serving only when explicitly opted in with
+    // `RUN_MIGRATIONS=1` (or `true`). Off by default; otherwise run
+    // `sqlx migrate run` out of band.
+    let run_migrations = std::env::var("RUN_MIGRATIONS")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true"))
+        .unwrap_or(false);
+    if run_migrations {
+        fin_all::server::db::run_pending_migrations(&pool)
+            .await
+            .expect("failed to apply database migrations");
+        log!("database migrations applied");
+    }
+
     let app = Router::new()
         .leptos_routes_with_context(
             &leptos_options,
