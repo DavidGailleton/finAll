@@ -24,3 +24,11 @@ pub async fn create_pool() -> Result<PgPool, sqlx::Error> {
 pub async fn run_pending_migrations(pool: &PgPool) -> Result<(), sqlx::migrate::MigrateError> {
     sqlx::migrate!().run(pool).await
 }
+
+/// Verify the database is reachable by acquiring a connection from the pool and
+/// running a trivial query.
+///
+/// Used by the `/health` readiness probe.
+pub async fn check_connection(pool: &PgPool) -> Result<(), sqlx::Error> {
+    sqlx::query("SELECT 1").execute(pool).await.map(|_| ())
+}
