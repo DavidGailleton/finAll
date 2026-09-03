@@ -32,6 +32,13 @@ async fn main() {
     }
 
     let app = Router::new()
+        .route(
+            "/health",
+            axum::routing::get({
+                let pool = pool.clone();
+                move || health(pool.clone())
+            }),
+        )
         .leptos_routes_with_context(
             &leptos_options,
             routes,
@@ -54,6 +61,24 @@ async fn main() {
     axum::serve(listener, app.into_make_service())
         .await
         .unwrap();
+}
+
+/// Liveness and database-readiness probe backing the `/health` endpoint that the
+/// Docker healthchecks poll. Returns `200 OK` when a query against the pool
+/// succeeds, `503 Service Unavailable` otherwise. The underlying error is logged
+/// server-side and never included in the response.
+#[cfg(feature = "ssr")]
+async fn health(pool: sqlx::PgPool) -> axum::http::StatusCode {
+    use axum::http::StatusCode;
+    use leptos::logging::log;
+
+    match fin_all::server::db::check_connection(&pool).await {
+        Ok(()) => StatusCode::OK,
+        Err(err) => {
+            log!("health: database readiness check failed: {err}");
+            StatusCode::SERVICE_UNAVAILABLE
+        }
+    }
 }
 
 #[cfg(not(feature = "ssr"))]
