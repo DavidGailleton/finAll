@@ -31,6 +31,25 @@ async fn main() {
         log!("database migrations applied");
     }
 
+    // Periodically sweep sessions that expired without a logout ever revoking
+    // them (see server::auth::session::revoke).
+    tokio::spawn({
+        let pool = pool.clone();
+        async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60 * 60));
+            loop {
+                interval.tick().await;
+                match fin_all::server::auth::session::prune_expired(&pool).await {
+                    Ok(count) if count > 0 => {
+                        log!("session cleanup: removed {count} expired session(s)")
+                    }
+                    Ok(_) => {}
+                    Err(_) => log!("session cleanup: failed to prune expired sessions"),
+                }
+            }
+        }
+    });
+
     let app = Router::new()
         .route(
             "/health",
