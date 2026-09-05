@@ -48,11 +48,11 @@ pub async fn login(email: String, password: String) -> Result<SessionUser, Serve
     use axum::http::header::SET_COOKIE;
     use leptos_axum::ResponseOptions;
 
-    use crate::server::auth::{cookie, password as pw, session, token, user};
+    use crate::server::auth::{cookie, password as pw, session, token, user, validate};
     use crate::server::error::AuthError;
 
     let pool = expect_context::<sqlx::PgPool>();
-    let email = email.trim().to_owned();
+    let email = validate::normalize_email(&email);
 
     let record = user::find_active_by_email(&pool, &email).await?;
 

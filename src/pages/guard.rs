@@ -24,3 +24,26 @@ pub fn GuestOnly(children: ChildrenFn) -> impl IntoView {
         </Suspense>
     }
 }
+
+/// Wraps a page that only signed-in visitors should see (everything except
+/// login and signup).
+///
+/// While the session check is in flight nothing is rendered. A visitor who is
+/// not signed in is redirected to `/login`; otherwise the children render.
+#[component]
+pub fn RequireAuth(children: ChildrenFn) -> impl IntoView {
+    let session = Resource::new(|| (), |_| async move { current_user().await });
+
+    view! {
+        <Suspense fallback=|| ()>
+            {move || {
+                session
+                    .get()
+                    .map(|result| match result {
+                        Ok(Some(_)) => children(),
+                        _ => view! { <Redirect path="/login" /> }.into_any(),
+                    })
+            }}
+        </Suspense>
+    }
+}

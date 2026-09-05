@@ -23,3 +23,8 @@ rustc-ice-*.txt
 # .envs
 *.env
 !.env.example
+
+# cargo-leptos build output (bundle is rebuilt into target/site; see Cargo.toml
+# site-root). The repo-root copy was committed incidentally with the initial
+# Docker setup and nothing consumes it.
+/site/

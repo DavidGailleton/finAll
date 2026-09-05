@@ -38,8 +38,12 @@ server.
 - Schema lives in `migrations/*.sql` (sqlx migration format). Current schema: `users`,
   `accounts`, `transactions`, `currencies`, plus an `account_balances` view. Amounts are
   `NUMERIC(38, 18)`; all tables use `uuidv7()` PKs and soft-delete via `deleted_at`.
-- Migrations are **not** run automatically by the app yet and no `sqlx` migrate call exists
-  in `main.rs`.
+- Migrations are applied on startup **only** when `RUN_MIGRATIONS=1` (or `true`) is set:
+  `main.rs` then calls `server::db::run_pending_migrations`, which runs
+  `sqlx::migrate!().run(&pool)`. The flag is off by default; the normal path is to apply
+  migrations out of band with `sqlx migrate run` (`make migrate` in dev). `sqlx::migrate!`
+  embeds the SQL at compile time, so the runtime image does not need `migrations/` for the
+  in-app path.
 - SQL is linted with **sqlfluff** (`.sqlfluff`, postgres dialect): keywords/types UPPER,
   functions/identifiers lower, 100-col lines.
 - `DATABASE_URL` (e.g. `postgres://finall:<pw>@db:5432/finall`) is required for `sqlx`
@@ -475,7 +479,9 @@ For database work:
 - Do not run `sqlfluff fix` automatically because it can rewrite more than the requested
   change.
 
-Do not add automatic migration execution to application startup unless explicitly requested.
+Startup migration execution exists but is opt-in via `RUN_MIGRATIONS` (default off). Do not
+make it run by default, and do not add further automatic migration execution unless
+explicitly requested.
 
 Do not use compile-time `sqlx` query validation as proof that runtime authorization and
 business validation are correct.

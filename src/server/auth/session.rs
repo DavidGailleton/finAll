@@ -87,3 +87,20 @@ pub async fn revoke(pool: &PgPool, token_hash: &str) -> Result<(), AuthError> {
 
     Ok(())
 }
+
+/// Delete every session whose expiry has already passed. `revoke` already
+/// removes a session immediately on logout; this sweeps sessions that expired
+/// without ever being revoked (e.g. a user who never logged out). Returns the
+/// number of rows removed.
+pub async fn prune_expired(pool: &PgPool) -> Result<u64, AuthError> {
+    let result = sqlx::query!(
+        r#"
+        DELETE FROM sessions
+        WHERE expires_at < now()
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected())
+}

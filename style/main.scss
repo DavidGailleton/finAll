@@ -66,3 +66,26 @@ body {
 	margin-top: 1rem;
 	font-size: 0.875rem;
 }
+
+.app-shell {
+	display: flex;
+	min-height: 100vh;
+	text-align: left;
+}
+
+.app-nav {
+	display: flex;
+	flex-direction: column;
+	width: 14rem;
+	padding: 1rem;
+	border-right: 1px solid #ccc;
+}
+
+.app-nav-footer {
+	margin-top: auto;
+}
+
+.app-main {
+	flex: 1;
+	padding: 1.5rem;
+}

@@ -18,7 +18,46 @@ async fn main() {
         .await
         .expect("could not connect to the database (check DATABASE_URL)");
 
+    // Apply pending migrations before serving only when explicitly opted in with
+    // `RUN_MIGRATIONS=1` (or `true`). Off by default; otherwise run
+    // `sqlx migrate run` out of band.
+    let run_migrations = std::env::var("RUN_MIGRATIONS")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true"))
+        .unwrap_or(false);
+    if run_migrations {
+        fin_all::server::db::run_pending_migrations(&pool)
+            .await
+            .expect("failed to apply database migrations");
+        log!("database migrations applied");
+    }
+
+    // Periodically sweep sessions that expired without a logout ever revoking
+    // them (see server::auth::session::revoke).
+    tokio::spawn({
+        let pool = pool.clone();
+        async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60 * 60));
+            loop {
+                interval.tick().await;
+                match fin_all::server::auth::session::prune_expired(&pool).await {
+                    Ok(count) if count > 0 => {
+                        log!("session cleanup: removed {count} expired session(s)")
+                    }
+                    Ok(_) => {}
+                    Err(_) => log!("session cleanup: failed to prune expired sessions"),
+                }
+            }
+        }
+    });
+
     let app = Router::new()
+        .route(
+            "/health",
+            axum::routing::get({
+                let pool = pool.clone();
+                move || health(pool.clone())
+            }),
+        )
         .leptos_routes_with_context(
             &leptos_options,
             routes,
@@ -41,6 +80,24 @@ async fn main() {
     axum::serve(listener, app.into_make_service())
         .await
         .unwrap();
+}
+
+/// Liveness and database-readiness probe backing the `/health` endpoint that the
+/// Docker healthchecks poll. Returns `200 OK` when a query against the pool
+/// succeeds, `503 Service Unavailable` otherwise. The underlying error is logged
+/// server-side and never included in the response.
+#[cfg(feature = "ssr")]
+async fn health(pool: sqlx::PgPool) -> axum::http::StatusCode {
+    use axum::http::StatusCode;
+    use leptos::logging::log;
+
+    match fin_all::server::db::check_connection(&pool).await {
+        Ok(()) => StatusCode::OK,
+        Err(err) => {
+            log!("health: database readiness check failed: {err}");
+            StatusCode::SERVICE_UNAVAILABLE
+        }
+    }
 }
 
 #[cfg(not(feature = "ssr"))]

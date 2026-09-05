@@ -37,6 +37,7 @@ services:
       LEPTOS_SITE_PKG_DIR: pkg
       LEPTOS_ENV: PROD
       RUST_LOG: ${RUST_LOG:-info}
+      RUN_MIGRATIONS: ${RUN_MIGRATIONS:-0}
     depends_on:
       db:
         condition: service_healthy
