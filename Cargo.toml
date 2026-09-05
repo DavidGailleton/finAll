@@ -25,10 +25,12 @@ sqlx = { version = "0.9", optional = true, default-features = false, features = 
   "uuid",
   "chrono",
   "json",
+  "bigdecimal",
 ] }
 
 # Shared: DTOs crossing the server-function boundary.
 serde = { version = "1", features = ["derive"] }
+bigdecimal = { version = "0.4", features = ["serde"] }
 
 # Server-only: password hashing, session-token hashing/RNG, and the auth error type.
 argon2 = { version = "0.6", optional = true }
