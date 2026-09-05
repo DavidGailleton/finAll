@@ -2,5 +2,6 @@
 //! must never be reachable from hydration code.
 
 pub mod auth;
+pub mod currency;
 pub mod db;
 pub mod error;
