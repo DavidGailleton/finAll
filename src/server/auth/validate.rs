@@ -90,17 +90,26 @@ mod tests {
 
     #[test]
     fn email_rejects_missing_at() {
-        assert!(matches!(email("user.example.com"), Err(AuthError::InvalidInput(_))));
+        assert!(matches!(
+            email("user.example.com"),
+            Err(AuthError::InvalidInput(_))
+        ));
     }
 
     #[test]
     fn email_rejects_empty_local_part() {
-        assert!(matches!(email("@example.com"), Err(AuthError::InvalidInput(_))));
+        assert!(matches!(
+            email("@example.com"),
+            Err(AuthError::InvalidInput(_))
+        ));
     }
 
     #[test]
     fn email_rejects_domain_without_dot() {
-        assert!(matches!(email("user@localhost"), Err(AuthError::InvalidInput(_))));
+        assert!(matches!(
+            email("user@localhost"),
+            Err(AuthError::InvalidInput(_))
+        ));
     }
 
     #[test]
