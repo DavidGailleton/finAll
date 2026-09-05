@@ -23,5 +23,3 @@ rustc-ice-*.txt
 # .envs
 *.env
 !.env.example
-
-.sqlx/
