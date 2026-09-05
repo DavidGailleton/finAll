@@ -1,0 +1,59 @@
+name: Rust
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+  # .sqlx/ is checked in, so sqlx macros validate against the offline cache
+  # instead of needing a live DATABASE_URL.
+  SQLX_OFFLINE: "true"
+  # Keep in sync with .env.example / Dockerfile.dev.
+  CARGO_LEPTOS_VERSION: "0.3.6"
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Add wasm32 target and components
+      run: |
+        rustup target add wasm32-unknown-unknown
+        rustup component add clippy rustfmt
+
+    - name: Install cargo-leptos
+      run: |
+        curl \
+          --proto '=https' \
+          --tlsv1.2 \
+          -LsSf \
+          "https://github.com/leptos-rs/cargo-leptos/releases/download/v${CARGO_LEPTOS_VERSION}/cargo-leptos-installer.sh" \
+        | sh
+
+    - name: Install sqlfluff
+      run: pip install sqlfluff
+
+    - name: cargo fmt --check
+      run: cargo fmt --check
+
+    - name: clippy (ssr)
+      run: cargo clippy --features ssr
+    - name: clippy (hydrate)
+      run: cargo clippy --features hydrate --target wasm32-unknown-unknown
+
+    - name: check (ssr)
+      run: cargo check --features ssr
+    - name: check (hydrate)
+      run: cargo check --features hydrate --target wasm32-unknown-unknown
+
+    - name: sqlfluff lint
+      run: sqlfluff lint migrations/
+
+    - name: cargo leptos test
+      run: cargo leptos test

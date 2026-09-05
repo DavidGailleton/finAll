@@ -24,8 +24,6 @@ rustc-ice-*.txt
 *.env
 !.env.example
 
-.sqlx/
-
 # cargo-leptos build output (bundle is rebuilt into target/site; see Cargo.toml
 # site-root). The repo-root copy was committed incidentally with the initial
 # Docker setup and nothing consumes it.
