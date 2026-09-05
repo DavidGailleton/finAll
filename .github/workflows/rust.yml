@@ -56,4 +56,4 @@ jobs:
       run: sqlfluff lint migrations/
 
     - name: cargo leptos test
-      run: cargo leptos test --verbose
+      run: cargo leptos test
