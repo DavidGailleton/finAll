@@ -1,7 +1,7 @@
 pub mod app;
+pub mod assets;
 pub mod auth;
 pub mod components;
-pub mod currency;
 pub mod pages;
 
 #[cfg(feature = "ssr")]

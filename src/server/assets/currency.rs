@@ -1,6 +1,8 @@
 //! Queries for the fiat currencies held in the `assets` / `fiat_assets` tables,
-//! the domain error, and the input validation for the currency server
-//! functions.
+//! the domain error, and the fiat-specific input validation for the currency
+//! server functions (the alphabetic and numeric code shapes, the minor-unit
+//! range). Validation of the shared `assets` columns (name, symbol) lives in
+//! [`crate::server::assets::validate`].
 //!
 //! A currency is an `assets` row with `asset_class = 'fiat'` joined to its
 //! `fiat_assets` detail row (`numeric_code`, `minor_units`). All values arriving
@@ -74,25 +76,6 @@ pub fn validate_numeric_code(input: Option<&str>) -> Result<Option<String>, Curr
         ));
     }
     Ok(Some(code.to_owned()))
-}
-
-/// Trim and validate the currency name is non-blank (mirrors
-/// `assets_name_not_empty`).
-pub fn validate_currency_name(input: &str) -> Result<String, CurrencyError> {
-    let name = input.trim();
-    if name.is_empty() {
-        return Err(CurrencyError::InvalidInput("currency name is required"));
-    }
-    Ok(name.to_owned())
-}
-
-/// Trim an optional symbol, treating blank as absent (mirrors
-/// `assets_symbol_not_empty`, which only constrains a non-null value).
-pub fn validate_symbol(input: Option<&str>) -> Option<String> {
-    input
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
 }
 
 /// Validate the minor-unit count is within the range the schema allows

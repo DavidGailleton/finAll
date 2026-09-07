@@ -6,13 +6,13 @@
 
 use leptos::prelude::*;
 
-use crate::currency::types::CurrencyDto;
+use crate::assets::currency::types::CurrencyDto;
 
 /// List active, non-deleted currencies, ordered by alphabetic code.
 #[server]
 pub async fn list_currencies() -> Result<Vec<CurrencyDto>, ServerFnError> {
+    use crate::server::assets::currency::{self, CurrencyError};
     use crate::server::auth::extract;
-    use crate::server::currency::{self, CurrencyError};
 
     let pool = expect_context::<sqlx::PgPool>();
 
@@ -45,8 +45,9 @@ pub async fn create_currency(
     symbol: Option<String>,
     minor_units: i16,
 ) -> Result<CurrencyDto, ServerFnError> {
+    use crate::server::assets::currency::{self, CurrencyError};
+    use crate::server::assets::validate;
     use crate::server::auth::extract;
-    use crate::server::currency::{self, CurrencyError};
 
     let pool = expect_context::<sqlx::PgPool>();
 
@@ -56,8 +57,8 @@ pub async fn create_currency(
 
     let alphabetic_code = currency::validate_alphabetic_code(&alphabetic_code)?;
     let numeric_code = currency::validate_numeric_code(numeric_code.as_deref())?;
-    let currency_name = currency::validate_currency_name(&currency_name)?;
-    let symbol = currency::validate_symbol(symbol.as_deref());
+    let currency_name = validate::name(&currency_name).map_err(CurrencyError::InvalidInput)?;
+    let symbol = validate::symbol(symbol.as_deref());
     let minor_units = currency::validate_minor_units(minor_units)?;
 
     let record = currency::create(
@@ -93,8 +94,9 @@ pub async fn update_currency(
 ) -> Result<CurrencyDto, ServerFnError> {
     use sqlx::types::Uuid;
 
+    use crate::server::assets::currency::{self, CurrencyError};
+    use crate::server::assets::validate;
     use crate::server::auth::extract;
-    use crate::server::currency::{self, CurrencyError};
 
     let pool = expect_context::<sqlx::PgPool>();
 
@@ -104,8 +106,8 @@ pub async fn update_currency(
 
     let id =
         Uuid::parse_str(&id).map_err(|_| CurrencyError::InvalidInput("invalid currency id"))?;
-    let currency_name = currency::validate_currency_name(&currency_name)?;
-    let symbol = currency::validate_symbol(symbol.as_deref());
+    let currency_name = validate::name(&currency_name).map_err(CurrencyError::InvalidInput)?;
+    let symbol = validate::symbol(symbol.as_deref());
     let minor_units = currency::validate_minor_units(minor_units)?;
 
     let record = currency::update(
@@ -135,8 +137,8 @@ pub async fn update_currency(
 pub async fn delete_currency(id: String) -> Result<(), ServerFnError> {
     use sqlx::types::Uuid;
 
+    use crate::server::assets::currency::{self, CurrencyError};
     use crate::server::auth::extract;
-    use crate::server::currency::{self, CurrencyError};
 
     let pool = expect_context::<sqlx::PgPool>();
 
