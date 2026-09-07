@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE fiat_assets\n        SET minor_units = $2\n        WHERE asset_id = $1\n        RETURNING numeric_code\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "numeric_code",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "fiat_assets",
+            "name": "numeric_code"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Int2"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "7a522090c72a76033f068529461451aacfe84dbb63451ebf901b8101e5c160f8"
+}

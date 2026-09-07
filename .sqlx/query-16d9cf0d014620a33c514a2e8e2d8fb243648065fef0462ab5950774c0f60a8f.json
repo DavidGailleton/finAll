@@ -1,0 +1,98 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            a.id,\n            a.code AS alphabetic_code,\n            f.numeric_code,\n            a.asset_name AS currency_name,\n            a.symbol,\n            f.minor_units AS \"minor_units!\",\n            a.is_active\n        FROM assets AS a\n        INNER JOIN fiat_assets AS f ON f.asset_id = a.id\n        WHERE a.asset_class = 'fiat' AND a.is_active = TRUE AND a.deleted_at IS NULL\n        ORDER BY a.code\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "assets",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "alphabetic_code",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "assets",
+            "name": "code"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "numeric_code",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "fiat_assets",
+            "name": "numeric_code"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "currency_name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "assets",
+            "name": "asset_name"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "symbol",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "assets",
+            "name": "symbol"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "minor_units!",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "fiat_assets",
+            "name": "minor_units"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "is_active",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "assets",
+            "name": "is_active"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "16d9cf0d014620a33c514a2e8e2d8fb243648065fef0462ab5950774c0f60a8f"
+}
