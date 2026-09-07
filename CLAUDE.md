@@ -36,8 +36,10 @@ server.
 ## Database
 
 - Schema lives in `migrations/*.sql` (sqlx migration format). Current schema: `users`,
-  `accounts`, `transactions`, `currencies`, plus an `account_balances` view. Amounts are
-  `NUMERIC(38, 18)`; all tables use `uuidv7()` PKs and soft-delete via `deleted_at`.
+  `sessions`, `assets` + `fiat_assets` (a per-class detail table; a "currency" is a
+  `fiat`-class asset), `asset_rates`, `accounts`, `categories`, `merchants`,
+  `transactions`, `transfers`. Amounts are `NUMERIC(38, 18)`; all tables use `uuidv7()`
+  PKs and soft-delete via `deleted_at`.
 - Migrations are applied on startup **only** when `RUN_MIGRATIONS=1` (or `true`) is set:
   `main.rs` then calls `server::db::run_pending_migrations`, which runs
   `sqlx::migrate!().run(&pool)`. The flag is off by default; the normal path is to apply

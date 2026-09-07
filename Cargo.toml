@@ -25,16 +25,24 @@ sqlx = { version = "0.9", optional = true, default-features = false, features = 
   "uuid",
   "chrono",
   "json",
+  "bigdecimal",
 ] }
 
 # Shared: DTOs crossing the server-function boundary.
 serde = { version = "1", features = ["derive"] }
+bigdecimal = { version = "0.4", features = ["serde"] }
 
 # Server-only: password hashing, session-token hashing/RNG, and the auth error type.
 argon2 = { version = "0.6", optional = true }
 sha2 = { version = "0.11", optional = true }
 getrandom = { version = "0.4", optional = true }
 thiserror = { version = "2", optional = true }
+
+# Server-only: fetching ECB reference rates from the opt-in frankfurter.dev source.
+reqwest = { version = "0.12", optional = true, default-features = false, features = [
+  "rustls-tls-webpki-roots",
+] }
+serde_json = { version = "1", optional = true, features = ["raw_value"] }
 
 [features]
 hydrate = ["leptos/hydrate", "dep:console_error_panic_hook", "dep:wasm-bindgen"]
@@ -47,6 +55,8 @@ ssr = [
   "dep:sha2",
   "dep:getrandom",
   "dep:thiserror",
+  "dep:reqwest",
+  "dep:serde_json",
   "leptos/ssr",
   "leptos_meta/ssr",
   "leptos_router/ssr",

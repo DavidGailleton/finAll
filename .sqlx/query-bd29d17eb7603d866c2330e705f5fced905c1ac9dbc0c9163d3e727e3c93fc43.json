@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE assets\n        SET deleted_at = now()\n        WHERE id = $1 AND asset_class = 'fiat' AND deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bd29d17eb7603d866c2330e705f5fced905c1ac9dbc0c9163d3e727e3c93fc43"
+}

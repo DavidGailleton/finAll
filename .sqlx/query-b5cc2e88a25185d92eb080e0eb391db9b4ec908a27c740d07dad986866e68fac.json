@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO asset_rates\n                (base_asset_id, quote_asset_id, rate, rate_source, observed_at)\n            VALUES ($1, $2, $3, $4, $5)\n            ON CONFLICT (base_asset_id, quote_asset_id, rate_source, observed_at)\n            DO NOTHING\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Numeric",
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b5cc2e88a25185d92eb080e0eb391db9b4ec908a27c740d07dad986866e68fac"
+}

@@ -50,6 +50,32 @@ async fn main() {
         }
     });
 
+    // Poll frankfurter.dev for ECB euro reference rates only when explicitly
+    // opted in with `FETCH_FX_RATES=1` (or `true`). Off by default; manual rate
+    // entry is the primary path. Stores EUR-based rows in `asset_rates`.
+    let fetch_fx_rates = std::env::var("FETCH_FX_RATES")
+        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true"))
+        .unwrap_or(false);
+    if fetch_fx_rates {
+        tokio::spawn({
+            let pool = pool.clone();
+            async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(60 * 60));
+                loop {
+                    interval.tick().await;
+                    match fin_all::server::assets::rates::fetch_and_store(&pool).await {
+                        Ok(count) if count > 0 => {
+                            log!("fx rates: stored {count} EUR-based rate(s) from frankfurter")
+                        }
+                        Ok(_) => {}
+                        Err(_) => log!("fx rates: fetch failed"),
+                    }
+                }
+            }
+        });
+        log!("fx rates: frankfurter polling enabled");
+    }
+
     let app = Router::new()
         .route(
             "/health",

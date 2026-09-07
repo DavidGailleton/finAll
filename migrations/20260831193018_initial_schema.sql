@@ -43,50 +43,63 @@ CREATE TABLE sessions (
 CREATE INDEX sessions_user_id_idx
 ON sessions (user_id);
 
-CREATE TABLE currencies (
+CREATE TABLE assets (
     id UUID PRIMARY KEY DEFAULT uuidv7(),
-    alphabetic_code TEXT NOT NULL,
-    numeric_code TEXT,
-    currency_name TEXT NOT NULL,
+    asset_class TEXT NOT NULL,
+    code TEXT NOT NULL,
+    asset_name TEXT NOT NULL,
     symbol TEXT,
-    minor_units SMALLINT NOT NULL DEFAULT 2,
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     deleted_at TIMESTAMPTZ DEFAULT NULL,
 
-    CONSTRAINT currencies_alphabetic_code_unique
-    UNIQUE (alphabetic_code),
+    CONSTRAINT assets_class_code_unique
+    UNIQUE (asset_class, code),
 
-    CONSTRAINT currencies_numeric_code_unique
-    UNIQUE (numeric_code),
+    CONSTRAINT assets_class_valid
+    CHECK (asset_class IN ('fiat')),
 
-    CONSTRAINT currencies_alphabetic_code_valid
-    CHECK (alphabetic_code ~ '^[A-Z]{3}$'),
+    CONSTRAINT assets_code_not_empty
+    CHECK (length(trim(code)) > 0),
 
-    CONSTRAINT currencies_numeric_code_valid
-    CHECK (
-        numeric_code IS NULL
-        OR numeric_code ~ '^[0-9]{3}$'
-    ),
+    CONSTRAINT assets_name_not_empty
+    CHECK (length(trim(asset_name)) > 0),
 
-    CONSTRAINT currencies_name_not_empty
-    CHECK (length(trim(currency_name)) > 0),
-
-    CONSTRAINT currencies_minor_units_valid
-    CHECK (minor_units BETWEEN 0 AND 18),
-
-    CONSTRAINT currencies_symbol_not_empty
+    CONSTRAINT assets_symbol_not_empty
     CHECK (
         symbol IS NULL
         OR length(trim(symbol)) > 0
     )
 );
 
+CREATE TABLE fiat_assets (
+    asset_id UUID PRIMARY KEY,
+    numeric_code TEXT,
+    minor_units SMALLINT NOT NULL DEFAULT 2,
+
+    CONSTRAINT fiat_assets_asset_id_fk
+    FOREIGN KEY (asset_id)
+    REFERENCES assets (id)
+    ON DELETE CASCADE,
+
+    CONSTRAINT fiat_assets_numeric_code_unique
+    UNIQUE (numeric_code),
+
+    CONSTRAINT fiat_assets_numeric_code_valid
+    CHECK (
+        numeric_code IS NULL
+        OR numeric_code ~ '^[0-9]{3}$'
+    ),
+
+    CONSTRAINT fiat_assets_minor_units_valid
+    CHECK (minor_units BETWEEN 0 AND 18)
+);
+
 CREATE TABLE accounts (
     id UUID PRIMARY KEY DEFAULT uuidv7(),
     user_id UUID NOT NULL,
-    default_currency_id UUID NOT NULL,
+    default_asset_id UUID NOT NULL,
     account_name TEXT NOT NULL,
     account_type TEXT NOT NULL,
     initial_balance NUMERIC(38, 18) NOT NULL DEFAULT 0,
@@ -99,9 +112,9 @@ CREATE TABLE accounts (
     REFERENCES users (id)
     ON DELETE CASCADE,
 
-    CONSTRAINT accounts_default_currency_id_fk
-    FOREIGN KEY (default_currency_id)
-    REFERENCES currencies (id)
+    CONSTRAINT accounts_default_asset_id_fk
+    FOREIGN KEY (default_asset_id)
+    REFERENCES assets (id)
     ON DELETE RESTRICT,
 
     CONSTRAINT accounts_user_id_id_unique
@@ -127,8 +140,8 @@ CREATE TABLE accounts (
 CREATE INDEX accounts_user_id_idx
 ON accounts (user_id);
 
-CREATE INDEX accounts_default_currency_id_idx
-ON accounts (default_currency_id);
+CREATE INDEX accounts_default_asset_id_idx
+ON accounts (default_asset_id);
 
 CREATE TABLE categories (
     id UUID PRIMARY KEY DEFAULT uuidv7(),
@@ -189,7 +202,7 @@ CREATE TABLE transactions (
     id UUID PRIMARY KEY DEFAULT uuidv7(),
     user_id UUID NOT NULL,
     account_id UUID NOT NULL,
-    currency_id UUID NOT NULL,
+    asset_id UUID NOT NULL,
     category_id UUID DEFAULT NULL,
     merchant_id UUID DEFAULT NULL,
     amount NUMERIC(38, 18) NOT NULL,
@@ -204,9 +217,9 @@ CREATE TABLE transactions (
     REFERENCES accounts (user_id, id)
     ON DELETE CASCADE,
 
-    CONSTRAINT transactions_currency_id_fk
-    FOREIGN KEY (currency_id)
-    REFERENCES currencies (id)
+    CONSTRAINT transactions_asset_id_fk
+    FOREIGN KEY (asset_id)
+    REFERENCES assets (id)
     ON DELETE RESTRICT,
 
     CONSTRAINT transactions_category_id_fk
@@ -227,8 +240,8 @@ CREATE TABLE transactions (
 CREATE INDEX transactions_account_id_idx
 ON transactions (account_id);
 
-CREATE INDEX transactions_currency_id_idx
-ON transactions (currency_id);
+CREATE INDEX transactions_asset_id_idx
+ON transactions (asset_id);
 
 CREATE INDEX transactions_user_id_booking_date_idx
 ON transactions (user_id, booking_date);
@@ -273,10 +286,10 @@ CREATE TABLE transfers (
 CREATE INDEX transfers_user_id_idx
 ON transfers (user_id);
 
-CREATE TABLE currency_rates (
+CREATE TABLE asset_rates (
     id UUID PRIMARY KEY DEFAULT uuidv7(),
-    base_currency_id UUID NOT NULL,
-    quote_currency_id UUID NOT NULL,
+    base_asset_id UUID NOT NULL,
+    quote_asset_id UUID NOT NULL,
     rate NUMERIC(38, 18) NOT NULL,
     rate_source TEXT NOT NULL,
     observed_at TIMESTAMPTZ NOT NULL,
@@ -284,25 +297,25 @@ CREATE TABLE currency_rates (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     deleted_at TIMESTAMPTZ DEFAULT NULL,
 
-    CONSTRAINT currency_rates_base_currency_id_fk
-    FOREIGN KEY (base_currency_id)
-    REFERENCES currencies (id)
+    CONSTRAINT asset_rates_base_asset_id_fk
+    FOREIGN KEY (base_asset_id)
+    REFERENCES assets (id)
     ON DELETE RESTRICT,
 
-    CONSTRAINT currency_rates_quote_currency_id_fk
-    FOREIGN KEY (quote_currency_id)
-    REFERENCES currencies (id)
+    CONSTRAINT asset_rates_quote_asset_id_fk
+    FOREIGN KEY (quote_asset_id)
+    REFERENCES assets (id)
     ON DELETE RESTRICT,
 
-    CONSTRAINT currency_rates_distinct_currencies
-    CHECK (base_currency_id <> quote_currency_id),
+    CONSTRAINT asset_rates_distinct_assets
+    CHECK (base_asset_id <> quote_asset_id),
 
-    CONSTRAINT currency_rates_rate_positive
+    CONSTRAINT asset_rates_rate_positive
     CHECK (rate > 0),
 
-    CONSTRAINT currency_rates_rate_source_not_empty
+    CONSTRAINT asset_rates_rate_source_not_empty
     CHECK (length(trim(rate_source)) > 0),
 
-    CONSTRAINT currency_rates_observation_unique
-    UNIQUE (base_currency_id, quote_currency_id, rate_source, observed_at)
+    CONSTRAINT asset_rates_observation_unique
+    UNIQUE (base_asset_id, quote_asset_id, rate_source, observed_at)
 );
