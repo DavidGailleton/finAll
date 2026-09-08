@@ -307,3 +307,83 @@ mod tests {
         assert!(matches!(result, Err(BalanceError::RateUnavailable)));
     }
 }
+
+/// Authorization: `account_total` checks ownership through
+/// [`accounts::find_for_user`] before any balance work, and `balance_rows`
+/// scopes the `account_balances` view by `user_id` (the view itself exposes
+/// `user_id` but does not filter on it).
+///
+/// Every fixture here holds a single currency, so no exchange rate is involved;
+/// the conversion arithmetic is covered by the pure tests above.
+#[cfg(test)]
+mod db_tests {
+    use super::*;
+    use crate::server::test_support::{create_user, currency_id, date, dec, insert_transaction};
+
+    #[sqlx::test]
+    async fn account_total_denies_another_users_account(pool: PgPool) {
+        let alice = create_user(&pool, "alice@example.test").await;
+        let bob = create_user(&pool, "bob@example.test").await;
+        let eur = currency_id(&pool, "EUR").await;
+
+        let account = accounts::create(&pool, alice, "Alice Cash", "cash", eur)
+            .await
+            .expect("alice's account");
+        insert_transaction(&pool, alice, account.id, eur, "100.00", date(2026, 1, 15)).await;
+
+        let denied = account_total(&pool, bob, account.id).await;
+        assert!(matches!(denied, Err(BalanceError::NotFound)));
+
+        // Control: the owner gets the figure, so the account is valuable.
+        let total = account_total(&pool, alice, account.id)
+            .await
+            .expect("owner reads it");
+        assert_eq!(total.amount, dec("100.00"));
+    }
+
+    #[sqlx::test]
+    async fn account_total_sums_only_the_requested_account(pool: PgPool) {
+        let alice = create_user(&pool, "alice@example.test").await;
+        let bob = create_user(&pool, "bob@example.test").await;
+        let eur = currency_id(&pool, "EUR").await;
+
+        let first = accounts::create(&pool, alice, "Alice Cash", "cash", eur)
+            .await
+            .expect("alice's first account");
+        let second = accounts::create(&pool, alice, "Alice Bank", "bank", eur)
+            .await
+            .expect("alice's second account");
+        let bobs = accounts::create(&pool, bob, "Bob Cash", "cash", eur)
+            .await
+            .expect("bob's account");
+
+        insert_transaction(&pool, alice, first.id, eur, "100.00", date(2026, 1, 15)).await;
+        insert_transaction(&pool, alice, first.id, eur, "25.50", date(2026, 1, 16)).await;
+        insert_transaction(&pool, alice, second.id, eur, "999.00", date(2026, 1, 15)).await;
+        insert_transaction(&pool, bob, bobs.id, eur, "777.00", date(2026, 1, 15)).await;
+
+        let total = account_total(&pool, alice, first.id)
+            .await
+            .expect("owner reads it");
+        assert_eq!(total.amount, dec("125.50"));
+        assert_eq!(total.alphabetic_code, "EUR");
+    }
+
+    #[sqlx::test]
+    async fn account_total_is_zero_for_an_account_with_no_transactions(pool: PgPool) {
+        let alice = create_user(&pool, "alice@example.test").await;
+        let eur = currency_id(&pool, "EUR").await;
+
+        let account = accounts::create(&pool, alice, "Alice Cash", "cash", eur)
+            .await
+            .expect("alice's account");
+
+        // An account the caller owns but that holds nothing is a zero balance,
+        // not the `NotFound` a foreign account produces.
+        let total = account_total(&pool, alice, account.id)
+            .await
+            .expect("owner reads it");
+        assert_eq!(total.amount, dec("0"));
+        assert_eq!(total.alphabetic_code, "EUR");
+    }
+}

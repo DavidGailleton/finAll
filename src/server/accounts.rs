@@ -264,3 +264,166 @@ mod tests {
         assert!(validate_name("").is_err());
     }
 }
+
+/// Authorization: every query here is scoped by `user_id`, so one user must
+/// never read or change another's accounts. A wrong owner is deliberately
+/// reported as [`AccountError::NotFound`], indistinguishable from a missing
+/// row, so these tests assert `NotFound` rather than a distinct "forbidden"
+/// signal.
+///
+/// Each `#[sqlx::test]` runs against its own freshly migrated database.
+#[cfg(test)]
+mod db_tests {
+    use super::*;
+    use crate::server::test_support::{create_user, currency_id};
+
+    /// Two users and the currency their accounts are denominated in.
+    async fn two_users(pool: &PgPool) -> (Uuid, Uuid, Uuid) {
+        let alice = create_user(pool, "alice@example.test").await;
+        let bob = create_user(pool, "bob@example.test").await;
+        let eur = currency_id(pool, "EUR").await;
+        (alice, bob, eur)
+    }
+
+    #[sqlx::test]
+    async fn list_active_for_user_returns_only_the_owners_accounts(pool: PgPool) {
+        let (alice, bob, eur) = two_users(&pool).await;
+
+        let a1 = create(&pool, alice, "Alice Cash", "cash", eur)
+            .await
+            .expect("alice's first account");
+        let a2 = create(&pool, alice, "Alice Bank", "bank", eur)
+            .await
+            .expect("alice's second account");
+        let b1 = create(&pool, bob, "Bob Bank", "bank", eur)
+            .await
+            .expect("bob's account");
+
+        let alices: Vec<Uuid> = list_active_for_user(&pool, alice)
+            .await
+            .expect("lists")
+            .iter()
+            .map(|record| record.id)
+            .collect();
+        assert_eq!(alices.len(), 2);
+        assert!(alices.contains(&a1.id));
+        assert!(alices.contains(&a2.id));
+        assert!(!alices.contains(&b1.id));
+
+        let bobs: Vec<Uuid> = list_active_for_user(&pool, bob)
+            .await
+            .expect("lists")
+            .iter()
+            .map(|record| record.id)
+            .collect();
+        assert_eq!(bobs, vec![b1.id]);
+    }
+
+    #[sqlx::test]
+    async fn list_active_for_user_is_empty_for_a_user_with_no_accounts(pool: PgPool) {
+        let (alice, bob, eur) = two_users(&pool).await;
+
+        create(&pool, alice, "Alice Cash", "cash", eur)
+            .await
+            .expect("alice's account");
+
+        let bobs = list_active_for_user(&pool, bob).await.expect("lists");
+        assert!(bobs.is_empty());
+    }
+
+    #[sqlx::test]
+    async fn find_for_user_denies_another_users_account(pool: PgPool) {
+        let (alice, bob, eur) = two_users(&pool).await;
+
+        let account = create(&pool, alice, "Alice Cash", "cash", eur)
+            .await
+            .expect("alice's account");
+
+        let denied = find_for_user(&pool, bob, account.id).await;
+        assert!(matches!(denied, Err(AccountError::NotFound)));
+
+        // Control: the owner still reaches it, so the id itself is valid.
+        let found = find_for_user(&pool, alice, account.id)
+            .await
+            .expect("owner finds it");
+        assert_eq!(found.id, account.id);
+    }
+
+    #[sqlx::test]
+    async fn create_assigns_the_calling_users_id(pool: PgPool) {
+        let (alice, bob, eur) = two_users(&pool).await;
+
+        let account = create(&pool, alice, "Alice Cash", "cash", eur)
+            .await
+            .expect("alice's account");
+
+        assert!(matches!(
+            find_for_user(&pool, bob, account.id).await,
+            Err(AccountError::NotFound)
+        ));
+        assert!(find_for_user(&pool, alice, account.id).await.is_ok());
+    }
+
+    #[sqlx::test]
+    async fn update_denies_another_users_account_and_leaves_it_unchanged(pool: PgPool) {
+        let (alice, bob, eur) = two_users(&pool).await;
+        let usd = currency_id(&pool, "USD").await;
+
+        let account = create(&pool, alice, "Alice Cash", "cash", eur)
+            .await
+            .expect("alice's account");
+
+        let denied = update(&pool, bob, account.id, "Stolen", "bank", usd).await;
+        assert!(matches!(denied, Err(AccountError::NotFound)));
+
+        // The rejection must also mean nothing was written.
+        let after = find_for_user(&pool, alice, account.id)
+            .await
+            .expect("owner finds it");
+        assert_eq!(after.account_name, "Alice Cash");
+        assert_eq!(after.account_type, "cash");
+        assert_eq!(after.default_asset_id, eur);
+    }
+
+    #[sqlx::test]
+    async fn soft_delete_denies_another_users_account_and_leaves_it_visible(pool: PgPool) {
+        let (alice, bob, eur) = two_users(&pool).await;
+
+        let account = create(&pool, alice, "Alice Cash", "cash", eur)
+            .await
+            .expect("alice's account");
+
+        let denied = soft_delete(&pool, bob, account.id).await;
+        assert!(matches!(denied, Err(AccountError::NotFound)));
+
+        assert!(find_for_user(&pool, alice, account.id).await.is_ok());
+    }
+
+    #[sqlx::test]
+    async fn find_for_user_rejects_the_owners_own_soft_deleted_account(pool: PgPool) {
+        let (alice, _bob, eur) = two_users(&pool).await;
+
+        let account = create(&pool, alice, "Alice Cash", "cash", eur)
+            .await
+            .expect("alice's account");
+
+        soft_delete(&pool, alice, account.id)
+            .await
+            .expect("owner deletes it");
+
+        assert!(matches!(
+            find_for_user(&pool, alice, account.id).await,
+            Err(AccountError::NotFound)
+        ));
+        assert!(list_active_for_user(&pool, alice)
+            .await
+            .expect("lists")
+            .is_empty());
+
+        // Deleting again is not a second success.
+        assert!(matches!(
+            soft_delete(&pool, alice, account.id).await,
+            Err(AccountError::NotFound)
+        ));
+    }
+}

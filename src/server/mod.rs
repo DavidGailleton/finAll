@@ -8,3 +8,6 @@ pub mod balances;
 pub mod db;
 pub mod error;
 pub mod transactions;
+
+#[cfg(test)]
+mod test_support;

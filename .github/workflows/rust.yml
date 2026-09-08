@@ -19,6 +19,28 @@ jobs:
 
     runs-on: ubuntu-latest
 
+    # The database-backed authorization tests use `#[sqlx::test]`, which creates
+    # and drops a per-test database. Postgres 18 for `uuidv7()`, matching
+    # compose.yaml. These credentials are throwaway values for this runner's
+    # service container only.
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: finall
+          POSTGRES_PASSWORD: finall
+          POSTGRES_DB: finall
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgres://finall:finall@localhost:5432/finall
+
     steps:
     - uses: actions/checkout@v4
 
@@ -57,3 +79,9 @@ jobs:
 
     - name: cargo leptos test
       run: cargo leptos test
+
+    # Runs the database-backed tests, which `cargo leptos test` does not reach.
+    # Compilation still resolves the sqlx macros from .sqlx/ (SQLX_OFFLINE);
+    # DATABASE_URL is needed at run time only.
+    - name: cargo test (ssr)
+      run: cargo test --features ssr
