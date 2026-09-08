@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            a.id,\n            a.code AS alphabetic_code,\n            f.minor_units AS \"minor_units!\"\n        FROM assets AS a\n        INNER JOIN fiat_assets AS f ON f.asset_id = a.id\n        WHERE a.id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "assets",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "alphabetic_code",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "assets",
+            "name": "code"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "minor_units!",
+        "type_info": "Int2",
+        "origin": {
+          "Table": {
+            "table": "fiat_assets",
+            "name": "minor_units"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "466a7f5fad61a8630baa346b578e2b1097716e1fadaaf098a8afa1d44d01dd75"
+}

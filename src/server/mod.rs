@@ -4,6 +4,7 @@
 pub mod accounts;
 pub mod assets;
 pub mod auth;
+pub mod balances;
 pub mod db;
 pub mod error;
 pub mod transactions;
