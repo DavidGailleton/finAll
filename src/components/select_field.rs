@@ -11,13 +11,17 @@ pub fn SelectField(
     label: &'static str,
     /// The `name` attribute; must match the server function argument.
     name: &'static str,
+    /// Whether a value must be chosen. Defaults to true; pair it with a
+    /// disabled, selected placeholder `<option value="">` to force a choice.
+    #[prop(default = true)]
+    required: bool,
     /// The `<option>` elements.
     children: Children,
 ) -> impl IntoView {
     view! {
         <div class="field">
             <label for=name>{label}</label>
-            <select id=name name=name>
+            <select id=name name=name required=required>
                 {children()}
             </select>
         </div>

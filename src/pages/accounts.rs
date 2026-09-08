@@ -8,8 +8,11 @@ use leptos::prelude::*;
 use leptos_router::components::A;
 use leptos_router::hooks::{use_navigate, use_params_map};
 
-use crate::accounts::api::{get_account, list_accounts, DeleteAccount, UpdateAccount};
+use crate::accounts::api::{
+    get_account, list_accounts, CreateAccount, DeleteAccount, UpdateAccount,
+};
 use crate::accounts::types::AccountType;
+use crate::assets::currency::api::list_currencies;
 use crate::components::{Button, FormError, Layout, SelectField, TextField};
 use crate::pages::guard::RequireAuth;
 use crate::pages::server_error_message;
@@ -77,6 +80,124 @@ fn AccountsList() -> impl IntoView {
                     })
             }}
         </Suspense>
+        <AddAccountForm />
+    }
+}
+
+#[component]
+fn AddAccountForm() -> impl IntoView {
+    let create = ServerAction::<CreateAccount>::new();
+    let navigate = use_navigate();
+    let adding = RwSignal::new(false);
+
+    // Go to the new account's detail page once it is created.
+    Effect::new(move |_| {
+        if let Some(Ok(account)) = create.value().get() {
+            navigate(&format!("/accounts/{}", account.id), Default::default());
+        }
+    });
+
+    let create_error = Signal::derive(move || match create.value().get() {
+        Some(Err(err)) => Some(server_error_message(&err)),
+        _ => None,
+    });
+
+    // Only fetch the currency list once the form is opened.
+    let currencies = Resource::new(
+        move || adding.get(),
+        |adding| async move {
+            if adding {
+                list_currencies().await
+            } else {
+                Ok(Vec::new())
+            }
+        },
+    );
+
+    view! {
+        <div class="add-account">
+            <Show
+                when=move || adding.get()
+                fallback=move || {
+                    view! {
+                        <button type="button" class="btn" on:click=move |_| adding.set(true)>
+                            "Add account"
+                        </button>
+                    }
+                }
+            >
+                <Suspense fallback=|| {
+                    view! { <p class="loading">"Loading currencies…"</p> }
+                }>
+                    {move || {
+                        currencies
+                            .get()
+                            .map(|result| match result {
+                                Err(err) => {
+                                    view! {
+                                        <p class="form-error" role="alert">
+                                            {server_error_message(&err)}
+                                        </p>
+                                    }
+                                        .into_any()
+                                }
+                                Ok(currency_list) => {
+                                    view! {
+                                        <ActionForm action=create>
+                                            <TextField label="Name" name="account_name" />
+                                            <SelectField label="Type" name="account_type">
+                                                <option value="" disabled selected>
+                                                    "Select a type"
+                                                </option>
+                                                {AccountType::ALL
+                                                    .iter()
+                                                    .map(|account_type| {
+                                                        let account_type = *account_type;
+                                                        view! {
+                                                            <option value=account_type.as_db_str()>
+                                                                {account_type.label()}
+                                                            </option>
+                                                        }
+                                                    })
+                                                    .collect_view()}
+                                            </SelectField>
+                                            <SelectField label="Currency" name="default_asset_id">
+                                                <option value="" disabled selected>
+                                                    "Select a currency"
+                                                </option>
+                                                {currency_list
+                                                    .into_iter()
+                                                    .map(|currency| {
+                                                        view! {
+                                                            <option value=currency.id>
+                                                                {format!(
+                                                                    "{} — {}",
+                                                                    currency.alphabetic_code,
+                                                                    currency.currency_name,
+                                                                )}
+                                                            </option>
+                                                        }
+                                                    })
+                                                    .collect_view()}
+                                            </SelectField>
+                                            <FormError message=create_error />
+                                            <Button pending=create.pending()>"Create account"</Button>
+                                            <button
+                                                type="button"
+                                                class="btn"
+                                                on:click=move |_| adding.set(false)
+                                            >
+                                                "Cancel"
+                                            </button>
+                                        </ActionForm>
+                                    }
+                                        .into_any()
+                                }
+                            })
+                    }}
+                </Suspense>
+            </Show>
+        </div>
     }
 }
 

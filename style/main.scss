@@ -119,3 +119,14 @@ body {
 	color: #666;
 	font-size: 0.875rem;
 }
+
+.add-account {
+	margin-top: 1.5rem;
+}
+
+.add-account form {
+	display: flex;
+	flex-direction: column;
+	gap: 0.75rem;
+	max-width: 22rem;
+}
