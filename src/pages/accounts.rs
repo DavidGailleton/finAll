@@ -16,6 +16,7 @@ use crate::assets::currency::api::list_currencies;
 use crate::components::{Button, FormError, Layout, SelectField, TextField};
 use crate::pages::guard::RequireAuth;
 use crate::pages::server_error_message;
+use crate::transactions::api::list_account_transactions;
 
 /// `/accounts`
 #[component]
@@ -266,6 +267,7 @@ fn AccountDetail() -> impl IntoView {
                         }
                         Ok(account) => {
                             let account_id = account.id.clone();
+                            let transactions_account_id = account.id.clone();
                             let current_type = account.account_type;
                             view! {
                                 <h1>{account.account_name.clone()}</h1>
@@ -308,6 +310,8 @@ fn AccountDetail() -> impl IntoView {
                                     action=delete
                                     error=delete_error
                                 />
+
+                                <TransactionsList account_id=transactions_account_id />
                             }
                                 .into_any()
                         }
@@ -350,5 +354,91 @@ fn DeleteAccountForm(
                 </button>
             </ActionForm>
         </Show>
+    }
+}
+
+#[component]
+fn TransactionsList(account_id: String) -> impl IntoView {
+    let transactions = Resource::new(
+        move || account_id.clone(),
+        |account_id| async move { list_account_transactions(account_id).await },
+    );
+
+    view! {
+        <section class="transactions">
+            <h2>"Transactions"</h2>
+            <Suspense fallback=|| {
+                view! { <p class="loading">"Loading transactions…"</p> }
+            }>
+                {move || {
+                    transactions
+                        .get()
+                        .map(|result| match result {
+                            Err(err) => {
+                                view! {
+                                    <p class="form-error" role="alert">
+                                        {server_error_message(&err)}
+                                    </p>
+                                }
+                                    .into_any()
+                            }
+                            Ok(list) if list.is_empty() => {
+                                view! {
+                                    <p class="empty-state">
+                                        "No transactions on this account yet."
+                                    </p>
+                                }
+                                    .into_any()
+                            }
+                            Ok(list) => {
+                                view! {
+                                    <div class="table-scroll">
+                                        <table class="transactions-table">
+                                            <thead>
+                                                <tr>
+                                                    <th scope="col">"Date"</th>
+                                                    <th scope="col">"Merchant"</th>
+                                                    <th scope="col">"Category"</th>
+                                                    <th scope="col">"Amount"</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {list
+                                                    .into_iter()
+                                                    .map(|transaction| {
+                                                        view! {
+                                                            <tr>
+                                                                <td>{transaction.booking_date}</td>
+                                                                <td>
+                                                                    {transaction
+                                                                        .merchant_name
+                                                                        .unwrap_or_else(|| "—".to_owned())}
+                                                                </td>
+                                                                <td>
+                                                                    {transaction
+                                                                        .category_name
+                                                                        .unwrap_or_else(|| "—".to_owned())}
+                                                                </td>
+                                                                <td class="transaction-amount">
+                                                                    {format!(
+                                                                        "{} {}",
+                                                                        transaction.amount,
+                                                                        transaction.asset_code,
+                                                                    )}
+                                                                </td>
+                                                            </tr>
+                                                        }
+                                                    })
+                                                    .collect_view()}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                }
+                                    .into_any()
+                            }
+                        })
+                }}
+            </Suspense>
+        </section>
     }
 }

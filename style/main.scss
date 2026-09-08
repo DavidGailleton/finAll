@@ -130,3 +130,28 @@ body {
 	gap: 0.75rem;
 	max-width: 22rem;
 }
+
+.transactions {
+	margin-top: 2rem;
+}
+
+.table-scroll {
+	overflow-x: auto;
+}
+
+.transactions-table {
+	width: 100%;
+	border-collapse: collapse;
+}
+
+.transactions-table th,
+.transactions-table td {
+	padding: 0.5rem;
+	text-align: left;
+	border-bottom: 1px solid #eee;
+}
+
+.transactions-table td.transaction-amount {
+	text-align: right;
+	font-variant-numeric: tabular-nums;
+}

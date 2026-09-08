@@ -4,6 +4,7 @@ pub mod assets;
 pub mod auth;
 pub mod components;
 pub mod pages;
+pub mod transactions;
 
 #[cfg(feature = "ssr")]
 pub mod server;
