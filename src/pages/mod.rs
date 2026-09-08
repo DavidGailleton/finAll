@@ -1,10 +1,12 @@
 //! Routed pages. Shared between SSR and hydration.
 
+mod accounts;
 mod guard;
 mod home;
 mod login;
 mod signup;
 
+pub use accounts::{AccountDetailPage, AccountsPage};
 pub use guard::RequireAuth;
 pub use home::HomePage;
 pub use login::LoginPage;

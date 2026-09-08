@@ -23,7 +23,7 @@ SQLX             := $(DEV_EXEC_AS_USER) sqlx
 .DEFAULT_GOAL := help
 .PHONY: help dev prod down prod-down logs \
         migrate-new migrate migrate-revert migrate-info sqlx-prepare \
-        psql check lint fmt test
+        psql check lint fmt test test-db
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*## ' $(MAKEFILE_LIST) | sort | \
@@ -87,3 +87,9 @@ fmt: ## Format the Rust sources with rustfmt
 
 test: ## Run cargo leptos test
 	$(DEV_EXEC) cargo leptos test
+
+# The database-backed tests use #[sqlx::test], which creates and drops its own
+# temporary databases on the dev Postgres *server*. The finall dev database
+# itself is left untouched.
+test-db: ## Run the database-backed tests (ssr) against the dev database server
+	$(DEV_EXEC) cargo test --features ssr

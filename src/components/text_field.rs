@@ -20,6 +20,9 @@ pub fn TextField(
     /// Whether the field is required. Defaults to true.
     #[prop(default = true)]
     required: bool,
+    /// Initial value of the input, for edit forms.
+    #[prop(optional, into)]
+    value: Option<String>,
 ) -> impl IntoView {
     view! {
         <div class="field">
@@ -30,6 +33,7 @@ pub fn TextField(
                 type=input_type
                 autocomplete=autocomplete
                 required=required
+                value=value
             />
         </div>
     }

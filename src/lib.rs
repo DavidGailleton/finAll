@@ -1,8 +1,11 @@
+pub mod accounts;
 pub mod app;
 pub mod assets;
 pub mod auth;
+pub mod balances;
 pub mod components;
 pub mod pages;
+pub mod transactions;
 
 #[cfg(feature = "ssr")]
 pub mod server;
