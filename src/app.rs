@@ -2,10 +2,10 @@ use leptos::prelude::*;
 use leptos_meta::{provide_meta_context, MetaTags, Stylesheet, Title};
 use leptos_router::{
     components::{Route, Router, Routes},
-    StaticSegment,
+    ParamSegment, StaticSegment,
 };
 
-use crate::pages::{HomePage, LoginPage, SignupPage};
+use crate::pages::{AccountDetailPage, AccountsPage, HomePage, LoginPage, SignupPage};
 
 pub fn shell(options: LeptosOptions) -> impl IntoView {
     view! {
@@ -45,6 +45,11 @@ pub fn App() -> impl IntoView {
                     <Route path=StaticSegment("") view=HomePage/>
                     <Route path=StaticSegment("login") view=LoginPage/>
                     <Route path=StaticSegment("signup") view=SignupPage/>
+                    <Route path=StaticSegment("accounts") view=AccountsPage/>
+                    <Route
+                        path=(StaticSegment("accounts"), ParamSegment("id"))
+                        view=AccountDetailPage
+                    />
                 </Routes>
             </main>
         </Router>

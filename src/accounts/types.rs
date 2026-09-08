@@ -22,7 +22,7 @@ pub enum AccountType {
 
 impl AccountType {
     /// Every variant, in declaration order.
-    const ALL: [AccountType; 7] = [
+    pub const ALL: [AccountType; 7] = [
         AccountType::Cash,
         AccountType::Bank,
         AccountType::Credit,
@@ -52,6 +52,19 @@ impl AccountType {
             .into_iter()
             .find(|variant| variant.as_db_str() == value)
     }
+
+    /// A capitalized label for display in the UI.
+    pub fn label(&self) -> &'static str {
+        match self {
+            AccountType::Cash => "Cash",
+            AccountType::Bank => "Bank",
+            AccountType::Credit => "Credit",
+            AccountType::Investment => "Investment",
+            AccountType::Crypto => "Crypto",
+            AccountType::Loan => "Loan",
+            AccountType::Other => "Other",
+        }
+    }
 }
 
 /// An account, in the shape the browser is allowed to see.
@@ -75,6 +88,7 @@ mod tests {
     fn db_str_round_trips_for_every_variant() {
         for variant in AccountType::ALL {
             assert_eq!(AccountType::from_db_str(variant.as_db_str()), Some(variant));
+            assert!(!variant.label().is_empty());
         }
     }
 

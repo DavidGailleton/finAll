@@ -39,6 +39,33 @@ pub async fn list_accounts() -> Result<Vec<AccountDto>, ServerFnError> {
     Ok(dtos)
 }
 
+/// Fetch one of the current user's accounts by id.
+#[server]
+pub async fn get_account(id: String) -> Result<AccountDto, ServerFnError> {
+    use sqlx::types::Uuid;
+
+    use crate::server::accounts::{self, AccountError};
+    use crate::server::auth::extract;
+
+    let pool = expect_context::<sqlx::PgPool>();
+
+    let user = extract::current_user(&pool)
+        .await?
+        .ok_or(AccountError::Unauthorized)?;
+
+    let id = Uuid::parse_str(&id).map_err(|_| AccountError::InvalidInput("invalid account id"))?;
+
+    let record = accounts::find_for_user(&pool, user.user_id, id).await?;
+
+    Ok(AccountDto {
+        id: record.id.to_string(),
+        account_name: record.account_name,
+        account_type: AccountType::from_db_str(&record.account_type)
+            .ok_or(AccountError::Internal)?,
+        default_asset_id: record.default_asset_id.to_string(),
+    })
+}
+
 /// Create a new account for the current user.
 #[server]
 pub async fn create_account(

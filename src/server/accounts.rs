@@ -103,6 +103,32 @@ pub async fn list_active_for_user(
     Ok(records)
 }
 
+/// Fetch one of the user's active (non-deleted) accounts by id.
+///
+/// Returns [`AccountError::NotFound`] if the id does not match one of this
+/// user's non-deleted accounts (a mismatched owner is indistinguishable from a
+/// missing row).
+pub async fn find_for_user(
+    pool: &PgPool,
+    user_id: Uuid,
+    id: Uuid,
+) -> Result<AccountRecord, AccountError> {
+    let record = sqlx::query_as!(
+        AccountRecord,
+        r#"
+        SELECT id, account_name, account_type, default_asset_id
+        FROM accounts
+        WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
+        "#,
+        id,
+        user_id,
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    record.ok_or(AccountError::NotFound)
+}
+
 /// Insert a new account for the user and return the created record.
 ///
 /// A foreign-key violation on `default_asset_id` (e.g. the currency was deleted

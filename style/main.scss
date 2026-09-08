@@ -34,7 +34,8 @@ body {
 	font-weight: 600;
 }
 
-.field input {
+.field input,
+.field select {
 	padding: 0.5rem;
 	font: inherit;
 	border: 1px solid #999;
@@ -81,6 +82,11 @@ body {
 	border-right: 1px solid #ccc;
 }
 
+.app-nav a {
+	display: block;
+	padding: 0.25rem 0;
+}
+
 .app-nav-footer {
 	margin-top: auto;
 }
@@ -88,4 +94,28 @@ body {
 .app-main {
 	flex: 1;
 	padding: 1.5rem;
+}
+
+.loading,
+.empty-state {
+	color: #666;
+}
+
+.accounts-list {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+}
+
+.account-row {
+	display: flex;
+	justify-content: space-between;
+	gap: 1rem;
+	padding: 0.5rem 0;
+	border-bottom: 1px solid #eee;
+}
+
+.account-type {
+	color: #666;
+	font-size: 0.875rem;
 }
