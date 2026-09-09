@@ -6,10 +6,11 @@
 //! ordinary [`transactions`] rows), and the [`transfers`] row that links them.
 //! Either all three land or none do; a half-written transfer can never exist.
 //!
-//! The two leg amounts are supplied independently, each in its own account's
-//! currency. Nothing is converted and no exchange rate is applied, looked up, or
-//! stored — the accounts may be denominated in different currencies. Each leg's
-//! `asset_id` is its account's own `default_asset_id`.
+//! The two leg amounts, and the currency each is in, are supplied independently
+//! by the caller. Nothing is converted and no exchange rate is applied, looked
+//! up, or stored — the two legs may be in different currencies. Each leg's
+//! `asset_id` must be an active fiat currency but need not be its account's
+//! `default_asset_id`, exactly like a plain transaction.
 //!
 //! Transfer legs carry no category or merchant: a transfer is neither income nor
 //! an expense. Editing or deleting a transfer is not built;
@@ -34,6 +35,9 @@ pub enum TransferError {
 
     #[error("you cannot transfer money to the same account")]
     SameAccount,
+
+    #[error("the selected currency does not exist")]
+    UnknownAsset,
 
     #[error("{0}")]
     InvalidInput(&'static str),
@@ -70,31 +74,35 @@ pub fn validate_amount(input: &str) -> Result<BigDecimal, TransferError> {
 }
 
 /// The inputs for [`create`]. `source_amount` / `destination_amount` are the
-/// positive magnitudes leaving the source and arriving at the destination, each
-/// in that account's own currency. The booking date is required; the value date
-/// is optional. Both dates apply to both legs.
+/// positive magnitudes leaving the source and arriving at the destination;
+/// `source_asset_id` / `destination_asset_id` name the currency each is in
+/// (each must be an active fiat currency, but may differ from that account's
+/// default). The booking date is required; the value date is optional. Both
+/// dates apply to both legs.
 pub struct TransferWrite {
     pub source_account_id: Uuid,
     pub destination_account_id: Uuid,
+    pub source_asset_id: Uuid,
+    pub destination_asset_id: Uuid,
     pub source_amount: BigDecimal,
     pub destination_amount: BigDecimal,
     pub booking_date: NaiveDate,
     pub value_date: Option<NaiveDate>,
 }
 
-/// The currency (a fiat `assets` id) of one of the user's non-deleted accounts.
+/// Confirm `account_id` is one of the user's non-deleted accounts.
 ///
 /// Scoping by `user_id` is the authorization check: another user's account is
 /// reported as [`TransferError::NotFound`], indistinguishable from a missing
 /// one.
-async fn account_currency(
+async fn assert_account_exists(
     conn: &mut PgConnection,
     user_id: Uuid,
     account_id: Uuid,
-) -> Result<Uuid, TransferError> {
-    let asset_id = sqlx::query_scalar!(
+) -> Result<(), TransferError> {
+    let found = sqlx::query_scalar!(
         r#"
-        SELECT default_asset_id
+        SELECT id
         FROM accounts
         WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
         "#,
@@ -104,7 +112,41 @@ async fn account_currency(
     .fetch_optional(&mut *conn)
     .await?;
 
-    asset_id.ok_or(TransferError::NotFound)
+    if found.is_none() {
+        return Err(TransferError::NotFound);
+    }
+
+    Ok(())
+}
+
+/// Confirm `asset_id` is an active, non-deleted fiat currency — one that
+/// `list_currencies` would return — not merely any row the foreign key allows.
+/// Mirrors the private `assert_currency_exists` in
+/// [`crate::server::transactions`] / `crate::server::accounts`, but runs on the
+/// transfer's transaction connection.
+async fn assert_currency_exists(
+    conn: &mut PgConnection,
+    asset_id: Uuid,
+) -> Result<(), TransferError> {
+    let found = sqlx::query_scalar!(
+        r#"
+        SELECT id
+        FROM assets
+        WHERE id = $1
+          AND asset_class = 'fiat'
+          AND is_active = TRUE
+          AND deleted_at IS NULL
+        "#,
+        asset_id,
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+
+    if found.is_none() {
+        return Err(TransferError::UnknownAsset);
+    }
+
+    Ok(())
 }
 
 /// Insert one leg of a transfer and return its transaction id. `amount` is
@@ -141,10 +183,11 @@ async fn insert_leg(
 /// Move money between two of the user's own accounts, writing both transaction
 /// legs and the linking `transfers` row in a single database transaction.
 ///
-/// Returns [`TransferError::SameAccount`] if the two accounts are the same, and
+/// Returns [`TransferError::SameAccount`] if the two accounts are the same,
 /// [`TransferError::NotFound`] if either account is not one of this user's
-/// non-deleted accounts. On any error the transaction is rolled back, so a
-/// partial transfer is never persisted.
+/// non-deleted accounts, and [`TransferError::UnknownAsset`] if either leg's
+/// currency is not an active fiat currency. On any error the transaction is
+/// rolled back, so a partial transfer is never persisted.
 pub async fn create(
     pool: &PgPool,
     user_id: Uuid,
@@ -156,17 +199,18 @@ pub async fn create(
 
     let mut tx = pool.begin().await?;
 
-    // Both accounts are resolved before either leg is inserted, so an invalid
-    // account writes nothing at all.
-    let source_asset = account_currency(&mut tx, user_id, write.source_account_id).await?;
-    let destination_asset =
-        account_currency(&mut tx, user_id, write.destination_account_id).await?;
+    // Every check runs before either leg is inserted, so an invalid account or
+    // currency writes nothing at all.
+    assert_account_exists(&mut tx, user_id, write.source_account_id).await?;
+    assert_account_exists(&mut tx, user_id, write.destination_account_id).await?;
+    assert_currency_exists(&mut tx, write.source_asset_id).await?;
+    assert_currency_exists(&mut tx, write.destination_asset_id).await?;
 
     let source_leg = insert_leg(
         &mut tx,
         user_id,
         write.source_account_id,
-        source_asset,
+        write.source_asset_id,
         &(-write.source_amount.clone()),
         write.booking_date,
         write.value_date,
@@ -177,7 +221,7 @@ pub async fn create(
         &mut tx,
         user_id,
         write.destination_account_id,
-        destination_asset,
+        write.destination_asset_id,
         &write.destination_amount,
         write.booking_date,
         write.value_date,
@@ -219,9 +263,9 @@ mod tests {
     }
 }
 
-/// Authorization: every query is scoped by `user_id`. `account_currency` reports
-/// an account that is not the caller's as `NotFound`, so `create` cannot move
-/// money into or out of another user's account. Each `#[sqlx::test]` runs
+/// Authorization: every query is scoped by `user_id`. `assert_account_exists`
+/// reports an account that is not the caller's as `NotFound`, so `create` cannot
+/// move money into or out of another user's account. Each `#[sqlx::test]` runs
 /// against its own freshly migrated database.
 #[cfg(test)]
 mod db_tests {
@@ -257,10 +301,12 @@ mod db_tests {
             .expect("query runs")
     }
 
-    fn write(source: Uuid, destination: Uuid, amount: &str) -> TransferWrite {
+    fn write(source: Uuid, destination: Uuid, asset: Uuid, amount: &str) -> TransferWrite {
         TransferWrite {
             source_account_id: source,
             destination_account_id: destination,
+            source_asset_id: asset,
+            destination_asset_id: asset,
             source_amount: dec(amount),
             destination_amount: dec(amount),
             booking_date: date(2026, 1, 15),
@@ -279,7 +325,7 @@ mod db_tests {
             .await
             .expect("savings");
 
-        let transfer_id = create(&pool, alice, &write(checking.id, savings.id, "30"))
+        let transfer_id = create(&pool, alice, &write(checking.id, savings.id, eur, "30"))
             .await
             .expect("transfer");
 
@@ -323,13 +369,17 @@ mod db_tests {
             &pool,
             alice,
             &TransferWrite {
+                destination_asset_id: usd,
                 destination_amount: dec("33"),
-                ..write(euro_account.id, dollar_account.id, "30")
+                ..write(euro_account.id, dollar_account.id, eur, "30")
             },
         )
         .await
         .expect("transfer");
 
+        // Each leg records the currency named in the write, not its account's
+        // default (here they happen to line up, but the write is the source of
+        // truth).
         let source_row = account_rows(&pool, alice, euro_account.id).await;
         assert_eq!(source_row[0].amount, dec("-30"));
         assert_eq!(source_row[0].asset_id, eur);
@@ -348,7 +398,7 @@ mod db_tests {
             .expect("account");
 
         assert!(matches!(
-            create(&pool, alice, &write(account.id, account.id, "10")).await,
+            create(&pool, alice, &write(account.id, account.id, eur, "10")).await,
             Err(TransferError::SameAccount)
         ));
         assert!(account_rows(&pool, alice, account.id).await.is_empty());
@@ -367,12 +417,41 @@ mod db_tests {
             .expect("bob's account");
 
         assert!(matches!(
-            create(&pool, alice, &write(alices.id, bobs.id, "10")).await,
+            create(&pool, alice, &write(alices.id, bobs.id, eur, "10")).await,
             Err(TransferError::NotFound)
         ));
 
         // The source leg was never written: an invalid destination rolls the
         // whole transfer back.
         assert!(account_rows(&pool, alice, alices.id).await.is_empty());
+    }
+
+    #[sqlx::test]
+    async fn create_rejects_an_unknown_currency(pool: PgPool) {
+        let alice = create_user(&pool, "alice@example.test").await;
+        let eur = currency_id(&pool, "EUR").await;
+        let checking = accounts::create(&pool, alice, "Checking", "bank", eur)
+            .await
+            .expect("checking");
+        let savings = accounts::create(&pool, alice, "Savings", "bank", eur)
+            .await
+            .expect("savings");
+
+        assert!(matches!(
+            create(
+                &pool,
+                alice,
+                &TransferWrite {
+                    source_asset_id: Uuid::nil(),
+                    ..write(checking.id, savings.id, eur, "10")
+                },
+            )
+            .await,
+            Err(TransferError::UnknownAsset)
+        ));
+
+        // Nothing was written: the currency is checked before either insert.
+        assert!(account_rows(&pool, alice, checking.id).await.is_empty());
+        assert!(account_rows(&pool, alice, savings.id).await.is_empty());
     }
 }
