@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            t.id,\n            t.amount,\n            t.asset_id,\n            a.code AS \"asset_code!\",\n            t.account_id,\n            acc.account_name AS \"account_name!\",\n            t.booking_date,\n            t.value_date,\n            c.category_name AS \"category_name?\",\n            m.merchant_name AS \"merchant_name?\"\n        FROM transactions AS t\n        INNER JOIN assets AS a ON a.id = t.asset_id\n        INNER JOIN accounts AS acc\n            ON acc.user_id = t.user_id AND acc.id = t.account_id\n        LEFT JOIN categories AS c\n            ON c.user_id = t.user_id AND c.id = t.category_id AND c.deleted_at IS NULL\n        LEFT JOIN merchants AS m\n            ON m.user_id = t.user_id AND m.id = t.merchant_id AND m.deleted_at IS NULL\n        WHERE t.user_id = $1\n          AND t.deleted_at IS NULL\n          AND acc.deleted_at IS NULL\n          AND ($2::uuid IS NULL OR t.account_id = $2)\n          AND ($3::date IS NULL OR t.booking_date >= $3)\n          AND ($4::date IS NULL OR t.booking_date <= $4)\n          AND ($5::date IS NULL OR (t.booking_date, t.id) < ($5::date, $6::uuid))\n        ORDER BY t.booking_date DESC, t.id DESC\n        LIMIT $7\n        ",
+  "query": "\n        SELECT\n            t.id,\n            t.amount,\n            t.asset_id,\n            a.code AS \"asset_code!\",\n            t.account_id,\n            acc.account_name AS \"account_name!\",\n            t.booking_date,\n            t.value_date,\n            t.category_id,\n            c.category_name AS \"category_name?\",\n            t.merchant_id,\n            m.merchant_name AS \"merchant_name?\"\n        FROM transactions AS t\n        INNER JOIN assets AS a ON a.id = t.asset_id\n        INNER JOIN accounts AS acc\n            ON acc.user_id = t.user_id AND acc.id = t.account_id\n        LEFT JOIN categories AS c\n            ON c.user_id = t.user_id AND c.id = t.category_id AND c.deleted_at IS NULL\n        LEFT JOIN merchants AS m\n            ON m.user_id = t.user_id AND m.id = t.merchant_id AND m.deleted_at IS NULL\n        WHERE t.user_id = $1\n          AND t.deleted_at IS NULL\n          AND acc.deleted_at IS NULL\n          AND ($2::uuid IS NULL OR t.account_id = $2)\n          AND ($3::date IS NULL OR t.booking_date >= $3)\n          AND ($4::date IS NULL OR t.booking_date <= $4)\n          AND ($5::date IS NULL OR (t.booking_date, t.id) < ($5::date, $6::uuid))\n        ORDER BY t.booking_date DESC, t.id DESC\n        LIMIT $7\n        ",
   "describe": {
     "columns": [
       {
@@ -93,6 +93,17 @@
       },
       {
         "ordinal": 8,
+        "name": "category_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "transactions",
+            "name": "category_id"
+          }
+        }
+      },
+      {
+        "ordinal": 9,
         "name": "category_name?",
         "type_info": "Text",
         "origin": {
@@ -103,7 +114,18 @@
         }
       },
       {
-        "ordinal": 9,
+        "ordinal": 10,
+        "name": "merchant_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "transactions",
+            "name": "merchant_id"
+          }
+        }
+      },
+      {
+        "ordinal": 11,
         "name": "merchant_name?",
         "type_info": "Text",
         "origin": {
@@ -134,9 +156,11 @@
       false,
       false,
       true,
+      true,
       false,
+      true,
       false
     ]
   },
-  "hash": "e54d0dbdde837be4041cfcdfd23892f4e141521d27bc5e5cca3ed214cb3d17cf"
+  "hash": "2ab1ccf052cb4249bc45de25b7e9786df6aee1b55151e1829f59c03be774f610"
 }

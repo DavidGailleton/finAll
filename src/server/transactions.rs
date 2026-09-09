@@ -40,6 +40,12 @@ pub enum TransactionError {
     #[error("the selected currency does not exist")]
     UnknownAsset,
 
+    #[error("the selected category does not exist")]
+    UnknownCategory,
+
+    #[error("the selected merchant does not exist")]
+    UnknownMerchant,
+
     #[error("this transaction is part of a transfer; edit or delete the transfer instead")]
     PartOfTransfer,
 
@@ -68,7 +74,9 @@ pub struct TransactionRecord {
     pub account_name: String,
     pub booking_date: NaiveDate,
     pub value_date: Option<NaiveDate>,
+    pub category_id: Option<Uuid>,
     pub category_name: Option<String>,
+    pub merchant_id: Option<Uuid>,
     pub merchant_name: Option<String>,
 }
 
@@ -122,7 +130,9 @@ pub async fn list(
             acc.account_name AS "account_name!",
             t.booking_date,
             t.value_date,
+            t.category_id,
             c.category_name AS "category_name?",
+            t.merchant_id,
             m.merchant_name AS "merchant_name?"
         FROM transactions AS t
         INNER JOIN assets AS a ON a.id = t.asset_id
@@ -289,6 +299,59 @@ async fn assert_currency_exists(pool: &PgPool, asset_id: Uuid) -> Result<(), Tra
     Ok(())
 }
 
+/// Confirm `category_id` is one of the user's active (non-deleted) categories,
+/// not merely any row the composite foreign key allows. Mirrors
+/// [`assert_currency_exists`].
+async fn assert_category_exists(
+    pool: &PgPool,
+    user_id: Uuid,
+    category_id: Uuid,
+) -> Result<(), TransactionError> {
+    let found = sqlx::query_scalar!(
+        r#"
+        SELECT id
+        FROM categories
+        WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
+        "#,
+        category_id,
+        user_id,
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    if found.is_none() {
+        return Err(TransactionError::UnknownCategory);
+    }
+
+    Ok(())
+}
+
+/// Confirm `merchant_id` is one of the user's active (non-deleted) merchants.
+/// Mirrors [`assert_category_exists`].
+async fn assert_merchant_exists(
+    pool: &PgPool,
+    user_id: Uuid,
+    merchant_id: Uuid,
+) -> Result<(), TransactionError> {
+    let found = sqlx::query_scalar!(
+        r#"
+        SELECT id
+        FROM merchants
+        WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
+        "#,
+        merchant_id,
+        user_id,
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    if found.is_none() {
+        return Err(TransactionError::UnknownMerchant);
+    }
+
+    Ok(())
+}
+
 /// Reject a transaction that is one leg of a (non-deleted) transfer: a plain
 /// edit or delete of a single leg would leave the transfer half-broken, so the
 /// caller is told to act on the transfer instead.
@@ -318,20 +381,49 @@ async fn assert_not_transfer_leg(
     Ok(())
 }
 
-/// Insert a transaction on one of the user's accounts. `category_id` and
-/// `merchant_id` are left `NULL`.
+/// The mutable fields of a transaction, shared by [`create`] and [`update`] so
+/// neither grows a long list of positional arguments (in particular two
+/// same-typed `Option<Uuid>` next to each other). The account is not here: a
+/// transaction cannot be moved between accounts.
+pub struct TransactionWrite {
+    pub asset_id: Uuid,
+    pub amount: BigDecimal,
+    pub booking_date: NaiveDate,
+    pub value_date: Option<NaiveDate>,
+    pub category_id: Option<Uuid>,
+    pub merchant_id: Option<Uuid>,
+}
+
+/// Check that a `TransactionWrite`'s currency, category, and merchant are all
+/// things this user could actually have picked (not merely rows the foreign
+/// keys allow, and not soft-deleted ones).
+async fn assert_write_targets_exist(
+    pool: &PgPool,
+    user_id: Uuid,
+    write: &TransactionWrite,
+) -> Result<(), TransactionError> {
+    assert_currency_exists(pool, write.asset_id).await?;
+    if let Some(category_id) = write.category_id {
+        assert_category_exists(pool, user_id, category_id).await?;
+    }
+    if let Some(merchant_id) = write.merchant_id {
+        assert_merchant_exists(pool, user_id, merchant_id).await?;
+    }
+    Ok(())
+}
+
+/// Insert a transaction on one of the user's accounts.
 ///
 /// Returns [`TransactionError::NotFound`] if `account_id` is not one of this
-/// user's non-deleted accounts, and [`TransactionError::UnknownAsset`] if
-/// `asset_id` is not a valid currency.
+/// user's non-deleted accounts, [`TransactionError::UnknownAsset`] if the
+/// currency is not valid, and [`TransactionError::UnknownCategory`] /
+/// [`TransactionError::UnknownMerchant`] if a supplied `category_id` /
+/// `merchant_id` is not one of the user's active rows.
 pub async fn create(
     pool: &PgPool,
     user_id: Uuid,
     account_id: Uuid,
-    asset_id: Uuid,
-    amount: &BigDecimal,
-    booking_date: NaiveDate,
-    value_date: Option<NaiveDate>,
+    write: &TransactionWrite,
 ) -> Result<Uuid, TransactionError> {
     let account = sqlx::query_scalar!(
         r#"
@@ -349,20 +441,23 @@ pub async fn create(
         return Err(TransactionError::NotFound);
     }
 
-    assert_currency_exists(pool, asset_id).await?;
+    assert_write_targets_exist(pool, user_id, write).await?;
 
     let row = match sqlx::query!(
         r#"
-        INSERT INTO transactions (user_id, account_id, asset_id, amount, booking_date, value_date)
-        VALUES ($1, $2, $3, $4, $5, $6)
+        INSERT INTO transactions
+            (user_id, account_id, asset_id, amount, booking_date, value_date, category_id, merchant_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         RETURNING id
         "#,
         user_id,
         account_id,
-        asset_id,
-        amount,
-        booking_date,
-        value_date,
+        write.asset_id,
+        write.amount,
+        write.booking_date,
+        write.value_date,
+        write.category_id,
+        write.merchant_id,
     )
     .fetch_one(pool)
     .await
@@ -377,24 +472,24 @@ pub async fn create(
     Ok(row.id)
 }
 
-/// Update the user's transaction: its amount, currency, and dates. The account
-/// and any category/merchant are left unchanged.
+/// Update the user's transaction: its amount, currency, dates, category, and
+/// merchant. The account is left unchanged. `category_id` / `merchant_id` are
+/// written on every call — `None` clears the column.
 ///
 /// Returns [`TransactionError::NotFound`] if the id is not one of this user's
 /// non-deleted transactions, [`TransactionError::PartOfTransfer`] if it is a
-/// transfer leg, and [`TransactionError::UnknownAsset`] if `asset_id` is not a
-/// valid currency.
+/// transfer leg, [`TransactionError::UnknownAsset`] if the currency is not
+/// valid, and [`TransactionError::UnknownCategory`] /
+/// [`TransactionError::UnknownMerchant`] if a supplied `category_id` /
+/// `merchant_id` is not one of the user's active rows.
 pub async fn update(
     pool: &PgPool,
     user_id: Uuid,
     id: Uuid,
-    asset_id: Uuid,
-    amount: &BigDecimal,
-    booking_date: NaiveDate,
-    value_date: Option<NaiveDate>,
+    write: &TransactionWrite,
 ) -> Result<(), TransactionError> {
     assert_not_transfer_leg(pool, user_id, id).await?;
-    assert_currency_exists(pool, asset_id).await?;
+    assert_write_targets_exist(pool, user_id, write).await?;
 
     let row = match sqlx::query!(
         r#"
@@ -403,16 +498,20 @@ pub async fn update(
             amount = $4,
             booking_date = $5,
             value_date = $6,
+            category_id = $7,
+            merchant_id = $8,
             updated_at = now()
         WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
         RETURNING id
         "#,
         id,
         user_id,
-        asset_id,
-        amount,
-        booking_date,
-        value_date,
+        write.asset_id,
+        write.amount,
+        write.booking_date,
+        write.value_date,
+        write.category_id,
+        write.merchant_id,
     )
     .fetch_optional(pool)
     .await
@@ -557,10 +656,10 @@ mod tests {
 #[cfg(test)]
 mod db_tests {
     use super::*;
-    use crate::server::accounts;
     use crate::server::test_support::{
         create_user, currency_id, date, dec, insert_transaction, insert_transfer,
     };
+    use crate::server::{accounts, categories, merchants};
 
     /// The caller's transactions on one account, newest first (first page).
     async fn account_rows(
@@ -579,6 +678,20 @@ mod db_tests {
         .await
         .expect("list runs")
         .records
+    }
+
+    /// A `TransactionWrite` with the given currency / amount / booking date and
+    /// nothing else set. Tests that exercise the value date, category, or
+    /// merchant tweak the returned value.
+    fn write(asset_id: Uuid, amount: &str, booking_date: NaiveDate) -> TransactionWrite {
+        TransactionWrite {
+            asset_id,
+            amount: dec(amount),
+            booking_date,
+            value_date: None,
+            category_id: None,
+            merchant_id: None,
+        }
     }
 
     #[sqlx::test]
@@ -819,10 +932,7 @@ mod db_tests {
             &pool,
             alice,
             account.id,
-            eur,
-            &dec("10.00"),
-            date(2026, 1, 15),
-            None,
+            &write(eur, "10.00", date(2026, 1, 15)),
         )
         .await
         .expect("alice records a transaction");
@@ -832,10 +942,7 @@ mod db_tests {
             &pool,
             bob,
             account.id,
-            eur,
-            &dec("10.00"),
-            date(2026, 1, 15),
-            None,
+            &write(eur, "10.00", date(2026, 1, 15)),
         )
         .await;
         assert!(matches!(denied, Err(TransactionError::NotFound)));
@@ -857,10 +964,7 @@ mod db_tests {
             &pool,
             alice,
             account.id,
-            eur,
-            &dec("10.00"),
-            date(2026, 1, 15),
-            None,
+            &write(eur, "10.00", date(2026, 1, 15)),
         )
         .await
         .expect("no value date");
@@ -868,10 +972,10 @@ mod db_tests {
             &pool,
             alice,
             account.id,
-            eur,
-            &dec("20.00"),
-            date(2026, 1, 16),
-            Some(date(2026, 1, 18)),
+            &TransactionWrite {
+                value_date: Some(date(2026, 1, 18)),
+                ..write(eur, "20.00", date(2026, 1, 16))
+            },
         )
         .await
         .expect("with value date");
@@ -899,10 +1003,7 @@ mod db_tests {
             &pool,
             bob,
             transaction,
-            usd,
-            &dec("-999.00"),
-            date(2026, 2, 1),
-            None,
+            &write(usd, "-999.00", date(2026, 2, 1)),
         )
         .await;
         assert!(matches!(denied, Err(TransactionError::NotFound)));
@@ -992,10 +1093,7 @@ mod db_tests {
                 &pool,
                 alice,
                 source,
-                eur,
-                &dec("-5.00"),
-                date(2026, 1, 15),
-                None
+                &write(eur, "-5.00", date(2026, 1, 15))
             )
             .await,
             Err(TransactionError::PartOfTransfer)
@@ -1007,5 +1105,161 @@ mod db_tests {
 
         // The legs are untouched.
         assert_eq!(account_rows(&pool, alice, account.id).await.len(), 2);
+    }
+
+    #[sqlx::test]
+    async fn create_and_update_set_the_category_and_merchant(pool: PgPool) {
+        let alice = create_user(&pool, "alice@example.test").await;
+        let eur = currency_id(&pool, "EUR").await;
+        let account = accounts::create(&pool, alice, "Alice Cash", "cash", eur)
+            .await
+            .expect("account");
+        let groceries = categories::create(&pool, alice, "Groceries", "expense")
+            .await
+            .expect("category")
+            .id;
+        let salary = categories::create(&pool, alice, "Salary", "income")
+            .await
+            .expect("category")
+            .id;
+        let acme = merchants::create(&pool, alice, "Acme", None)
+            .await
+            .expect("merchant")
+            .id;
+
+        let id = create(
+            &pool,
+            alice,
+            account.id,
+            &TransactionWrite {
+                category_id: Some(groceries),
+                merchant_id: Some(acme),
+                ..write(eur, "-12.00", date(2026, 1, 15))
+            },
+        )
+        .await
+        .expect("create");
+
+        let rows = account_rows(&pool, alice, account.id).await;
+        assert_eq!(rows[0].category_id, Some(groceries));
+        assert_eq!(rows[0].category_name.as_deref(), Some("Groceries"));
+        assert_eq!(rows[0].merchant_id, Some(acme));
+        assert_eq!(rows[0].merchant_name.as_deref(), Some("Acme"));
+
+        // Update swaps the category and clears the merchant.
+        update(
+            &pool,
+            alice,
+            id,
+            &TransactionWrite {
+                category_id: Some(salary),
+                merchant_id: None,
+                ..write(eur, "-12.00", date(2026, 1, 15))
+            },
+        )
+        .await
+        .expect("update");
+
+        let rows = account_rows(&pool, alice, account.id).await;
+        assert_eq!(rows[0].category_id, Some(salary));
+        assert_eq!(rows[0].merchant_id, None);
+        assert_eq!(rows[0].merchant_name, None);
+    }
+
+    #[sqlx::test]
+    async fn create_and_update_reject_a_foreign_or_deleted_category_or_merchant(pool: PgPool) {
+        let alice = create_user(&pool, "alice@example.test").await;
+        let bob = create_user(&pool, "bob@example.test").await;
+        let eur = currency_id(&pool, "EUR").await;
+        let account = accounts::create(&pool, alice, "Alice Cash", "cash", eur)
+            .await
+            .expect("account");
+
+        let bobs_category = categories::create(&pool, bob, "Bob Cat", "expense")
+            .await
+            .expect("category")
+            .id;
+        let bobs_merchant = merchants::create(&pool, bob, "Bob Merchant", None)
+            .await
+            .expect("merchant")
+            .id;
+        let alices_category = categories::create(&pool, alice, "Food", "expense")
+            .await
+            .expect("category")
+            .id;
+        let alices_merchant = merchants::create(&pool, alice, "Store", None)
+            .await
+            .expect("merchant")
+            .id;
+
+        // Another user's category / merchant is not reachable.
+        assert!(matches!(
+            create(
+                &pool,
+                alice,
+                account.id,
+                &TransactionWrite {
+                    category_id: Some(bobs_category),
+                    ..write(eur, "-1.00", date(2026, 1, 15))
+                },
+            )
+            .await,
+            Err(TransactionError::UnknownCategory)
+        ));
+        assert!(matches!(
+            create(
+                &pool,
+                alice,
+                account.id,
+                &TransactionWrite {
+                    merchant_id: Some(bobs_merchant),
+                    ..write(eur, "-1.00", date(2026, 1, 15))
+                },
+            )
+            .await,
+            Err(TransactionError::UnknownMerchant)
+        ));
+
+        // A soft-deleted own category / merchant is refused too.
+        let id = create(
+            &pool,
+            alice,
+            account.id,
+            &write(eur, "-1.00", date(2026, 1, 15)),
+        )
+        .await
+        .expect("plain create");
+        categories::soft_delete(&pool, alice, alices_category)
+            .await
+            .expect("delete category");
+        merchants::soft_delete(&pool, alice, alices_merchant)
+            .await
+            .expect("delete merchant");
+        assert!(matches!(
+            update(
+                &pool,
+                alice,
+                id,
+                &TransactionWrite {
+                    category_id: Some(alices_category),
+                    ..write(eur, "-1.00", date(2026, 1, 15))
+                },
+            )
+            .await,
+            Err(TransactionError::UnknownCategory)
+        ));
+        assert!(matches!(
+            update(
+                &pool,
+                alice,
+                id,
+                &TransactionWrite {
+                    merchant_id: Some(alices_merchant),
+                    ..write(eur, "-1.00", date(2026, 1, 15))
+                },
+            )
+            .await,
+            Err(TransactionError::UnknownMerchant)
+        ));
     }
 }

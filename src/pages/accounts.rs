@@ -13,7 +13,11 @@ use crate::accounts::api::{
 };
 use crate::accounts::types::AccountType;
 use crate::assets::currency::api::list_currencies;
+use crate::categories::api::list_categories;
+use crate::categories::types::CategoryDto;
 use crate::components::{Button, FormError, Layout, SelectField, TextField};
+use crate::merchants::api::list_merchants;
+use crate::merchants::types::MerchantDto;
 use crate::pages::guard::RequireAuth;
 use crate::pages::server_error_message;
 use crate::transactions::api::{
@@ -577,9 +581,16 @@ fn EditTransactionForm(
     transaction: TransactionDto,
     action: ServerAction<UpdateTransaction>,
 ) -> impl IntoView {
-    // Only mounted while a row is being edited, so fetch the currency list on
-    // mount.
-    let currencies = Resource::new(|| (), |_| async move { list_currencies().await });
+    // Only mounted while a row is being edited, so fetch the pick lists on mount.
+    let form_data = Resource::new(
+        || (),
+        |_| async move {
+            let currencies = list_currencies().await?;
+            let categories = list_categories().await?;
+            let merchants = list_merchants().await?;
+            Ok::<_, ServerFnError>((currencies, categories, merchants))
+        },
+    );
 
     let error = Signal::derive(move || match action.value().get() {
         Some(Err(err)) => Some(server_error_message(&err)),
@@ -588,11 +599,11 @@ fn EditTransactionForm(
 
     view! {
         <Suspense fallback=|| {
-            view! { <p class="loading">"Loading currencies…"</p> }
+            view! { <p class="loading">"Loading…"</p> }
         }>
             {move || {
                 let transaction = transaction.clone();
-                currencies
+                form_data
                     .get()
                     .map(move |result| match result {
                         Err(err) => {
@@ -603,7 +614,7 @@ fn EditTransactionForm(
                             }
                                 .into_any()
                         }
-                        Ok(currency_list) => {
+                        Ok((currency_list, category_list, merchant_list)) => {
                             let selected = transaction.asset_id.clone();
                             let value_date = transaction.value_date.clone().unwrap_or_default();
                             view! {
@@ -644,6 +655,18 @@ fn EditTransactionForm(
                                             })
                                             .collect_view()}
                                     </SelectField>
+                                    <CategoryMerchantFields
+                                        categories=category_list
+                                        merchants=merchant_list
+                                        category=transaction
+                                            .category_id
+                                            .clone()
+                                            .unwrap_or_default()
+                                        merchant=transaction
+                                            .merchant_id
+                                            .clone()
+                                            .unwrap_or_default()
+                                    />
                                     <FormError message=error />
                                     <Button pending=action.pending()>"Save"</Button>
                                 </ActionForm>
@@ -653,6 +676,76 @@ fn EditTransactionForm(
                     })
             }}
         </Suspense>
+    }
+}
+
+/// The optional Category and Merchant `<select>`s shared by the add and edit
+/// transaction forms. Picking a merchant that has a default category fills the
+/// category field in (still overridable); nothing is derived server-side.
+#[component]
+fn CategoryMerchantFields(
+    categories: Vec<CategoryDto>,
+    merchants: Vec<MerchantDto>,
+    /// Category id to preselect, `""` for none.
+    category: String,
+    /// Merchant id to preselect, `""` for none.
+    merchant: String,
+) -> impl IntoView {
+    let category_id = RwSignal::new(category);
+    let merchant_id = RwSignal::new(merchant);
+
+    let merchant_defaults = merchants.clone();
+    let on_merchant_change = move |ev| {
+        let picked = event_target_value(&ev);
+        if let Some(default) = merchant_defaults
+            .iter()
+            .find(|merchant| merchant.id == picked)
+            .and_then(|merchant| merchant.default_category_id.clone())
+        {
+            category_id.set(default);
+        }
+        merchant_id.set(picked);
+    };
+
+    view! {
+        <div class="field">
+            <label for="merchant_id">"Merchant"</label>
+            <select
+                id="merchant_id"
+                name="merchant_id"
+                prop:value=move || merchant_id.get()
+                on:change=on_merchant_change
+            >
+                <option value="">"None"</option>
+                {merchants
+                    .into_iter()
+                    .map(|merchant| {
+                        view! { <option value=merchant.id>{merchant.merchant_name}</option> }
+                    })
+                    .collect_view()}
+            </select>
+        </div>
+        <div class="field">
+            <label for="category_id">"Category"</label>
+            <select
+                id="category_id"
+                name="category_id"
+                prop:value=move || category_id.get()
+                on:change=move |ev| category_id.set(event_target_value(&ev))
+            >
+                <option value="">"None"</option>
+                {categories
+                    .into_iter()
+                    .map(|category| {
+                        view! {
+                            <option value=category.id>
+                                {format!("{} ({})", category.category_name, category.kind.label())}
+                            </option>
+                        }
+                    })
+                    .collect_view()}
+            </select>
+        </div>
     }
 }
 
@@ -712,15 +805,17 @@ fn AddTransactionForm(
         _ => None,
     });
 
-    // Only fetch the currency list once the form is opened.
-    let currencies = Resource::new(
+    // Only fetch the pick lists once the form is opened.
+    let form_data = Resource::new(
         move || adding.get(),
         |adding| async move {
-            if adding {
-                list_currencies().await
-            } else {
-                Ok(Vec::new())
+            if !adding {
+                return Ok::<_, ServerFnError>((Vec::new(), Vec::new(), Vec::new()));
             }
+            let currencies = list_currencies().await?;
+            let categories = list_categories().await?;
+            let merchants = list_merchants().await?;
+            Ok((currencies, categories, merchants))
         },
     );
 
@@ -740,10 +835,10 @@ fn AddTransactionForm(
                 }
             >
                 <Suspense fallback=|| {
-                    view! { <p class="loading">"Loading currencies…"</p> }
+                    view! { <p class="loading">"Loading…"</p> }
                 }>
                     {move || {
-                        currencies
+                        form_data
                             .get()
                             .map(|result| match result {
                                 Err(err) => {
@@ -754,7 +849,7 @@ fn AddTransactionForm(
                                     }
                                         .into_any()
                                 }
-                                Ok(currency_list) => {
+                                Ok((currency_list, category_list, merchant_list)) => {
                                     let selected = default_asset_id.get();
                                     view! {
                                         <ActionForm action=action>
@@ -792,6 +887,12 @@ fn AddTransactionForm(
                                                     })
                                                     .collect_view()}
                                             </SelectField>
+                                            <CategoryMerchantFields
+                                                categories=category_list
+                                                merchants=merchant_list
+                                                category=String::new()
+                                                merchant=String::new()
+                                            />
                                             <FormError message=error />
                                             <Button pending=action.pending()>"Add transaction"</Button>
                                             <button

@@ -33,9 +33,17 @@ pub struct TransactionDto {
     pub booking_date: String,
     /// Value date as an ISO `YYYY-MM-DD` string, if one is recorded.
     pub value_date: Option<String>,
-    /// The category name, if the transaction is categorised.
+    /// Id of the transaction's category, rendered as a string, if it is
+    /// categorised. Used to pre-select the edit form's category field.
+    pub category_id: Option<String>,
+    /// The category name, if the transaction is categorised and the category is
+    /// still active.
     pub category_name: Option<String>,
-    /// The merchant name, if the transaction has one.
+    /// Id of the transaction's merchant, rendered as a string, if it has one.
+    /// Used to pre-select the edit form's merchant field.
+    pub merchant_id: Option<String>,
+    /// The merchant name, if the transaction has one and the merchant is still
+    /// active.
     pub merchant_name: Option<String>,
 }
 

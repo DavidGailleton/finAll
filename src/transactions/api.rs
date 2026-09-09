@@ -9,6 +9,21 @@ use leptos::prelude::*;
 
 use crate::transactions::types::TransactionPage;
 
+/// Parse an optional id form field: a blank value is `None`, otherwise it must
+/// be a valid UUID. Ownership of the referenced row is enforced server-side.
+#[cfg(feature = "ssr")]
+fn parse_optional_id(
+    value: &str,
+    message: &'static str,
+) -> Result<Option<sqlx::types::Uuid>, crate::server::transactions::TransactionError> {
+    match value.trim() {
+        "" => Ok(None),
+        id => sqlx::types::Uuid::parse_str(id)
+            .map(Some)
+            .map_err(|_| crate::server::transactions::TransactionError::InvalidInput(message)),
+    }
+}
+
 /// One page (newest first, `booking_date` then `id`) of the current user's
 /// non-deleted transactions.
 ///
@@ -72,7 +87,9 @@ pub async fn list_transactions(
                 asset_code: record.asset_code,
                 booking_date: record.booking_date.to_string(),
                 value_date: record.value_date.map(|date| date.to_string()),
+                category_id: record.category_id.map(|id| id.to_string()),
                 category_name: record.category_name,
+                merchant_id: record.merchant_id.map(|id| id.to_string()),
                 merchant_name: record.merchant_name,
             })
             .collect(),
@@ -89,11 +106,13 @@ pub async fn create_transaction(
     amount: String,
     booking_date: String,
     value_date: Option<String>,
+    category_id: String,
+    merchant_id: String,
 ) -> Result<(), ServerFnError> {
     use sqlx::types::Uuid;
 
     use crate::server::auth::extract;
-    use crate::server::transactions::{self, TransactionError};
+    use crate::server::transactions::{self, TransactionError, TransactionWrite};
 
     let pool = expect_context::<sqlx::PgPool>();
 
@@ -103,22 +122,17 @@ pub async fn create_transaction(
 
     let account_id = Uuid::parse_str(&account_id)
         .map_err(|_| TransactionError::InvalidInput("invalid account id"))?;
-    let asset_id = Uuid::parse_str(&asset_id)
-        .map_err(|_| TransactionError::InvalidInput("invalid currency id"))?;
-    let amount = transactions::validate_amount(&amount)?;
-    let booking_date = transactions::validate_booking_date(&booking_date)?;
-    let value_date = transactions::validate_value_date(value_date.as_deref())?;
+    let write = TransactionWrite {
+        asset_id: Uuid::parse_str(&asset_id)
+            .map_err(|_| TransactionError::InvalidInput("invalid currency id"))?,
+        amount: transactions::validate_amount(&amount)?,
+        booking_date: transactions::validate_booking_date(&booking_date)?,
+        value_date: transactions::validate_value_date(value_date.as_deref())?,
+        category_id: parse_optional_id(&category_id, "invalid category id")?,
+        merchant_id: parse_optional_id(&merchant_id, "invalid merchant id")?,
+    };
 
-    transactions::create(
-        &pool,
-        user.user_id,
-        account_id,
-        asset_id,
-        &amount,
-        booking_date,
-        value_date,
-    )
-    .await?;
+    transactions::create(&pool, user.user_id, account_id, &write).await?;
 
     Ok(())
 }
@@ -132,11 +146,13 @@ pub async fn update_transaction(
     amount: String,
     booking_date: String,
     value_date: Option<String>,
+    category_id: String,
+    merchant_id: String,
 ) -> Result<(), ServerFnError> {
     use sqlx::types::Uuid;
 
     use crate::server::auth::extract;
-    use crate::server::transactions::{self, TransactionError};
+    use crate::server::transactions::{self, TransactionError, TransactionWrite};
 
     let pool = expect_context::<sqlx::PgPool>();
 
@@ -146,22 +162,17 @@ pub async fn update_transaction(
 
     let id = Uuid::parse_str(&id)
         .map_err(|_| TransactionError::InvalidInput("invalid transaction id"))?;
-    let asset_id = Uuid::parse_str(&asset_id)
-        .map_err(|_| TransactionError::InvalidInput("invalid currency id"))?;
-    let amount = transactions::validate_amount(&amount)?;
-    let booking_date = transactions::validate_booking_date(&booking_date)?;
-    let value_date = transactions::validate_value_date(value_date.as_deref())?;
+    let write = TransactionWrite {
+        asset_id: Uuid::parse_str(&asset_id)
+            .map_err(|_| TransactionError::InvalidInput("invalid currency id"))?,
+        amount: transactions::validate_amount(&amount)?,
+        booking_date: transactions::validate_booking_date(&booking_date)?,
+        value_date: transactions::validate_value_date(value_date.as_deref())?,
+        category_id: parse_optional_id(&category_id, "invalid category id")?,
+        merchant_id: parse_optional_id(&merchant_id, "invalid merchant id")?,
+    };
 
-    transactions::update(
-        &pool,
-        user.user_id,
-        id,
-        asset_id,
-        &amount,
-        booking_date,
-        value_date,
-    )
-    .await?;
+    transactions::update(&pool, user.user_id, id, &write).await?;
 
     Ok(())
 }

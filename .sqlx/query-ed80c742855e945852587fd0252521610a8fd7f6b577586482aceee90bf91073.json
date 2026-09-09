@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        UPDATE transactions\n        SET asset_id = $3,\n            amount = $4,\n            booking_date = $5,\n            value_date = $6,\n            updated_at = now()\n        WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL\n        RETURNING id\n        ",
+  "query": "\n        INSERT INTO transactions\n            (user_id, account_id, asset_id, amount, booking_date, value_date, category_id, merchant_id)\n        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)\n        RETURNING id\n        ",
   "describe": {
     "columns": [
       {
@@ -22,12 +22,14 @@
         "Uuid",
         "Numeric",
         "Date",
-        "Date"
+        "Date",
+        "Uuid",
+        "Uuid"
       ]
     },
     "nullable": [
       false
     ]
   },
-  "hash": "f42c2dd6c6a06b1e2b4f7a270c371c3e53ffede4a492d6e43e560c1ff55969b2"
+  "hash": "ed80c742855e945852587fd0252521610a8fd7f6b577586482aceee90bf91073"
 }
