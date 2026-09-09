@@ -354,6 +354,36 @@ pub async fn resolve_rate(
         .ok_or(RateResolutionError::Unavailable)
 }
 
+/// Resolve a `source_asset_id -> target_asset_id` rate as it stood on `as_of`:
+/// the latest observations dated on or before `as_of` that could form the rate,
+/// combined by [`derive_rate`] with the same direct / inverse / EUR-pivot
+/// precedence as [`resolve_rate`]. A pair with no usable observation in that
+/// window is [`RateResolutionError::Unavailable`].
+///
+/// `as_of` is compared against `asset_rates.observed_at`, which is stored at
+/// `00:00:00Z` of a reference date; pass a period boundary at `00:00:00Z` too
+/// so an observation dated exactly on that day is included.
+pub async fn resolve_rate_as_of(
+    pool: &PgPool,
+    source_asset_id: Uuid,
+    target_asset_id: Uuid,
+    as_of: DateTime<Utc>,
+) -> Result<ResolvedRate, RateResolutionError> {
+    let direct = latest_rate_as_of(pool, source_asset_id, target_asset_id, as_of).await?;
+    let inverse = latest_rate_as_of(pool, target_asset_id, source_asset_id, as_of).await?;
+
+    let (pivot_to_source, pivot_to_target) = match pivot_asset_id(pool).await? {
+        Some(pivot_id) => (
+            latest_rate_as_of(pool, pivot_id, source_asset_id, as_of).await?,
+            latest_rate_as_of(pool, pivot_id, target_asset_id, as_of).await?,
+        ),
+        None => (None, None),
+    };
+
+    derive_rate(direct, inverse, pivot_to_source, pivot_to_target)
+        .ok_or(RateResolutionError::Unavailable)
+}
+
 /// The latest non-deleted observation for one `(base, quote)` pair, or `None`.
 async fn latest_rate(
     pool: &PgPool,
@@ -374,6 +404,36 @@ async fn latest_rate(
         "#,
         base_asset_id,
         quote_asset_id,
+    )
+    .fetch_optional(pool)
+    .await
+}
+
+/// The latest non-deleted observation for one `(base, quote)` pair dated on or
+/// before `as_of`, or `None`. Time-bounded sibling of [`latest_rate`] — the
+/// "as-of date" that [`derive_rate`]'s contract anticipates.
+async fn latest_rate_as_of(
+    pool: &PgPool,
+    base_asset_id: Uuid,
+    quote_asset_id: Uuid,
+    as_of: DateTime<Utc>,
+) -> Result<Option<RateObservation>, sqlx::Error> {
+    sqlx::query_as!(
+        RateObservation,
+        r#"
+        SELECT rate, observed_at
+        FROM asset_rates
+        WHERE
+            base_asset_id = $1
+            AND quote_asset_id = $2
+            AND deleted_at IS NULL
+            AND observed_at <= $3
+        ORDER BY observed_at DESC, created_at DESC
+        LIMIT 1
+        "#,
+        base_asset_id,
+        quote_asset_id,
+        as_of,
     )
     .fetch_optional(pool)
     .await
@@ -597,5 +657,93 @@ mod tests {
     #[test]
     fn rejects_an_empty_response() {
         assert!(matches!(parse_payload("[]"), Err(RatesError::Parse(_))));
+    }
+}
+
+#[cfg(test)]
+mod as_of_tests {
+    use super::*;
+    use crate::server::test_support::{currency_id, dec};
+
+    fn midnight(year: i32, month: u32, day: u32) -> DateTime<Utc> {
+        let naive = NaiveDate::from_ymd_opt(year, month, day)
+            .expect("valid calendar date")
+            .and_hms_opt(0, 0, 0)
+            .expect("midnight is a valid time");
+        DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc)
+    }
+
+    async fn insert_observation(
+        pool: &PgPool,
+        base_asset_id: Uuid,
+        quote_asset_id: Uuid,
+        rate: &str,
+        observed_at: DateTime<Utc>,
+    ) {
+        sqlx::query(
+            r#"
+            INSERT INTO asset_rates
+                (base_asset_id, quote_asset_id, rate, rate_source, observed_at)
+            VALUES ($1, $2, $3, 'test', $4)
+            "#,
+        )
+        .bind(base_asset_id)
+        .bind(quote_asset_id)
+        .bind(dec(rate))
+        .bind(observed_at)
+        .execute(pool)
+        .await
+        .expect("insert test observation");
+    }
+
+    #[sqlx::test]
+    async fn picks_the_latest_observation_on_or_before_the_cutoff(pool: PgPool) {
+        let eur = currency_id(&pool, "EUR").await;
+        let usd = currency_id(&pool, "USD").await;
+        insert_observation(&pool, eur, usd, "1.10", midnight(2026, 1, 1)).await;
+        insert_observation(&pool, eur, usd, "1.20", midnight(2026, 2, 1)).await;
+
+        let resolved = resolve_rate_as_of(&pool, eur, usd, midnight(2026, 1, 15))
+            .await
+            .expect("a rate as of mid-January");
+
+        assert_eq!(resolved.rate, dec("1.10"));
+        assert_eq!(resolved.valuation_timestamp, midnight(2026, 1, 1));
+    }
+
+    #[sqlx::test]
+    async fn an_observation_dated_exactly_on_the_cutoff_is_included(pool: PgPool) {
+        let eur = currency_id(&pool, "EUR").await;
+        let usd = currency_id(&pool, "USD").await;
+        insert_observation(&pool, eur, usd, "1.15", midnight(2026, 3, 31)).await;
+
+        let resolved = resolve_rate_as_of(&pool, eur, usd, midnight(2026, 3, 31))
+            .await
+            .expect("the boundary observation is usable");
+        assert_eq!(resolved.rate, dec("1.15"));
+    }
+
+    #[sqlx::test]
+    async fn nothing_before_the_cutoff_is_unavailable(pool: PgPool) {
+        let eur = currency_id(&pool, "EUR").await;
+        let usd = currency_id(&pool, "USD").await;
+        insert_observation(&pool, eur, usd, "1.20", midnight(2026, 2, 1)).await;
+
+        let result = resolve_rate_as_of(&pool, eur, usd, midnight(2026, 1, 1)).await;
+        assert!(matches!(result, Err(RateResolutionError::Unavailable)));
+    }
+
+    #[sqlx::test]
+    async fn an_inverse_only_pair_resolves_to_the_reciprocal(pool: PgPool) {
+        let eur = currency_id(&pool, "EUR").await;
+        let usd = currency_id(&pool, "USD").await;
+        // Only EUR -> USD is stored; ask for USD -> EUR as of a later date.
+        insert_observation(&pool, eur, usd, "2", midnight(2026, 1, 1)).await;
+
+        let resolved = resolve_rate_as_of(&pool, usd, eur, midnight(2026, 6, 1))
+            .await
+            .expect("the reciprocal is usable");
+        assert_eq!(resolved.rate, dec("0.5"));
+        assert_eq!(resolved.valuation_timestamp, midnight(2026, 1, 1));
     }
 }

@@ -155,3 +155,31 @@ body {
 	text-align: right;
 	font-variant-numeric: tabular-nums;
 }
+
+.net-worth-total {
+	font-size: 1.25rem;
+	margin: 0.5rem 0 1rem;
+}
+
+.net-worth-warning {
+	margin: 0 0 1rem;
+	color: #92400e;
+	font-size: 0.875rem;
+}
+
+.income-expense-controls {
+	display: flex;
+	gap: 1rem;
+	flex-wrap: wrap;
+	align-items: flex-end;
+	margin: 0.5rem 0 1rem;
+}
+
+.income-expense-section {
+	margin-top: 1.5rem;
+}
+
+.income-expense-detail {
+	color: #666;
+	font-size: 0.875rem;
+}

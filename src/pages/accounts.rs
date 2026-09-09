@@ -14,6 +14,7 @@ use crate::accounts::api::{
 };
 use crate::accounts::types::AccountType;
 use crate::assets::currency::api::list_currencies;
+use crate::balances::api::account_balance;
 use crate::components::{Button, FormError, Layout, SelectField, TextField};
 use crate::pages::guard::RequireAuth;
 use crate::pages::ledger::{
@@ -224,6 +225,10 @@ fn AccountDetail() -> impl IntoView {
     let delete = ServerAction::<DeleteAccount>::new();
     let navigate = use_navigate();
 
+    // One bundle of ledger actions, shared by the transactions table and the
+    // balance line so both refetch after any transaction or transfer change.
+    let ledger_actions = LedgerActions::new();
+
     // Once the account is deleted, leave the detail page for the list.
     Effect::new(move |_| {
         if matches!(delete.value().get(), Some(Ok(_))) {
@@ -240,6 +245,24 @@ fn AccountDetail() -> impl IntoView {
             )
         },
         |(id, _)| async move { get_account(id).await },
+    );
+
+    // The account's total, valued in its own default currency. Refetched
+    // whenever a ledger write lands (the account edit form never changes the
+    // balance — the default currency is immutable — so it is not a key here).
+    let balance = Resource::new(
+        move || {
+            (
+                params.read().get("id").unwrap_or_default(),
+                ledger_actions.create_transaction.version().get(),
+                ledger_actions.update_transaction.version().get(),
+                ledger_actions.delete_transaction.version().get(),
+                ledger_actions.create_transfer.version().get(),
+                ledger_actions.update_transfer.version().get(),
+                ledger_actions.void_transfer.version().get(),
+            )
+        },
+        |(id, ..)| async move { account_balance(id).await },
     );
 
     let edit_error = Signal::derive(move || match edit.value().get() {
@@ -276,6 +299,39 @@ fn AccountDetail() -> impl IntoView {
                             view! {
                                 <h1>{account.account_name.clone()}</h1>
                                 <p class="account-type">{current_type.label()}</p>
+
+                                <Suspense fallback=|| {
+                                    view! { <p class="loading">"Loading balance…"</p> }
+                                }>
+                                    {move || {
+                                        balance
+                                            .get()
+                                            .map(|result| match result {
+                                                Err(err) => {
+                                                    view! {
+                                                        <p class="form-error" role="alert">
+                                                            {server_error_message(&err)}
+                                                        </p>
+                                                    }
+                                                        .into_any()
+                                                }
+                                                Ok(balance) => {
+                                                    view! {
+                                                        <p class="net-worth-total">
+                                                            <strong>
+                                                                {format!(
+                                                                    "{} {}",
+                                                                    balance.amount,
+                                                                    balance.currency_code,
+                                                                )}
+                                                            </strong>
+                                                        </p>
+                                                    }
+                                                        .into_any()
+                                                }
+                                            })
+                                    }}
+                                </Suspense>
 
                                 <ActionForm action=edit>
                                     <input type="hidden" name="id" value=account.id.clone() />
@@ -318,6 +374,7 @@ fn AccountDetail() -> impl IntoView {
                                 <TransactionsList
                                     account_id=transactions_account_id
                                     default_asset_id=transactions_default_asset_id
+                                    actions=ledger_actions
                                 />
                             }
                                 .into_any()
@@ -368,8 +425,11 @@ fn DeleteAccountForm(
 /// this account (no Account column), plus the "Add transaction" and "Add
 /// transfer" forms.
 #[component]
-fn TransactionsList(account_id: String, default_asset_id: String) -> impl IntoView {
-    let actions = LedgerActions::new();
+fn TransactionsList(
+    account_id: String,
+    default_asset_id: String,
+    actions: LedgerActions,
+) -> impl IntoView {
     let account_context = AccountContext {
         id: account_id.clone(),
         default_asset_id,
