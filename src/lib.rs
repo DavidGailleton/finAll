@@ -5,6 +5,7 @@ pub mod auth;
 pub mod balances;
 pub mod categories;
 pub mod components;
+pub mod income_expense;
 pub mod merchants;
 pub mod net_worth;
 pub mod pages;

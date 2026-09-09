@@ -166,3 +166,20 @@ body {
 	color: #92400e;
 	font-size: 0.875rem;
 }
+
+.income-expense-controls {
+	display: flex;
+	gap: 1rem;
+	flex-wrap: wrap;
+	align-items: flex-end;
+	margin: 0.5rem 0 1rem;
+}
+
+.income-expense-section {
+	margin-top: 1.5rem;
+}
+
+.income-expense-detail {
+	color: #666;
+	font-size: 0.875rem;
+}
