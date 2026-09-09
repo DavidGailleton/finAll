@@ -5,7 +5,9 @@ use leptos_router::{
     ParamSegment, StaticSegment,
 };
 
-use crate::pages::{AccountDetailPage, AccountsPage, HomePage, LoginPage, SignupPage};
+use crate::pages::{
+    AccountDetailPage, AccountsPage, HomePage, LoginPage, SignupPage, TransactionsPage,
+};
 
 pub fn shell(options: LeptosOptions) -> impl IntoView {
     view! {
@@ -50,6 +52,7 @@ pub fn App() -> impl IntoView {
                         path=(StaticSegment("accounts"), ParamSegment("id"))
                         view=AccountDetailPage
                     />
+                    <Route path=StaticSegment("transactions") view=TransactionsPage/>
                 </Routes>
             </main>
         </Router>

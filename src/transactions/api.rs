@@ -7,18 +7,26 @@
 
 use leptos::prelude::*;
 
-use crate::transactions::types::TransactionDto;
+use crate::transactions::types::TransactionPage;
 
-/// The 50 most recent non-deleted transactions on one of the current user's
-/// accounts, newest first (by booking date, then creation time).
+/// One page (newest first, `booking_date` then `id`) of the current user's
+/// non-deleted transactions.
+///
+/// `account_id` narrows to a single account; `from` / `to` are inclusive
+/// `booking_date` bounds (ISO `YYYY-MM-DD`, blank for open-ended); `cursor` is
+/// the `next_cursor` of the previous page. All are optional.
 #[server]
-pub async fn list_account_transactions(
-    account_id: String,
-) -> Result<Vec<TransactionDto>, ServerFnError> {
+pub async fn list_transactions(
+    account_id: Option<String>,
+    from: Option<String>,
+    to: Option<String>,
+    cursor: Option<String>,
+) -> Result<TransactionPage, ServerFnError> {
     use sqlx::types::Uuid;
 
     use crate::server::auth::extract;
-    use crate::server::transactions::{self, TransactionError};
+    use crate::server::transactions::{self, TransactionError, TransactionFilter};
+    use crate::transactions::types::TransactionDto;
 
     let pool = expect_context::<sqlx::PgPool>();
 
@@ -26,24 +34,50 @@ pub async fn list_account_transactions(
         .await?
         .ok_or(TransactionError::Unauthorized)?;
 
-    let account_id = Uuid::parse_str(&account_id)
+    let account_id = account_id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .map(Uuid::parse_str)
+        .transpose()
         .map_err(|_| TransactionError::InvalidInput("invalid account id"))?;
+    let (from, to) = transactions::validate_date_range(from.as_deref(), to.as_deref())?;
+    let after = cursor
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .map(transactions::parse_cursor)
+        .transpose()?;
 
-    let records = transactions::recent_for_account(&pool, user.user_id, account_id).await?;
+    let page = transactions::list(
+        &pool,
+        user.user_id,
+        TransactionFilter {
+            account_id,
+            from,
+            to,
+            after,
+        },
+    )
+    .await?;
 
-    Ok(records
-        .into_iter()
-        .map(|record| TransactionDto {
-            id: record.id.to_string(),
-            amount: record.amount.to_string(),
-            asset_id: record.asset_id.to_string(),
-            asset_code: record.asset_code,
-            booking_date: record.booking_date.to_string(),
-            value_date: record.value_date.map(|date| date.to_string()),
-            category_name: record.category_name,
-            merchant_name: record.merchant_name,
-        })
-        .collect())
+    Ok(TransactionPage {
+        transactions: page
+            .records
+            .into_iter()
+            .map(|record| TransactionDto {
+                id: record.id.to_string(),
+                account_id: record.account_id.to_string(),
+                account_name: record.account_name,
+                amount: record.amount.to_string(),
+                asset_id: record.asset_id.to_string(),
+                asset_code: record.asset_code,
+                booking_date: record.booking_date.to_string(),
+                value_date: record.value_date.map(|date| date.to_string()),
+                category_name: record.category_name,
+                merchant_name: record.merchant_name,
+            })
+            .collect(),
+        next_cursor: page.next.map(transactions::encode_cursor),
+    })
 }
 
 /// Record a new transaction on one of the current user's accounts. The amount

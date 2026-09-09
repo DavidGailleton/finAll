@@ -1,13 +1,14 @@
-//! Queries for a signed-in user's transactions on one account (`transactions`
-//! joined to `assets` for the currency code and to `categories` / `merchants`
-//! for display names), the create / edit / soft-delete writes, the input
-//! validation for the transaction server functions, and the domain error.
+//! Queries for a signed-in user's transactions (`transactions` joined to
+//! `assets` for the currency code, `accounts` for the account name, and
+//! `categories` / `merchants` for display names), the create / edit /
+//! soft-delete writes, the input validation for the transaction server
+//! functions, and the domain error.
 //!
 //! Every value arriving from a server function is untrusted. `validate_amount`,
-//! `validate_booking_date` and `validate_value_date` are the authoritative
-//! checks, mirroring the `transactions` table's constraints. Every query is
-//! scoped by `user_id` so one user can never read or change another's
-//! transactions.
+//! `validate_booking_date`, `validate_value_date` and `validate_date_range` are
+//! the authoritative checks, mirroring the `transactions` table's constraints.
+//! Every query is scoped by `user_id` so one user can never read or change
+//! another's transactions.
 
 use std::str::FromStr;
 
@@ -24,6 +25,9 @@ const AMOUNT_SCALE: i64 = 18;
 /// The largest number of integer digits `transactions.amount` can hold
 /// (`NUMERIC(38, 18)` leaves 38 - 18 for the integer part).
 const AMOUNT_INTEGER_DIGITS: i64 = 20;
+
+/// How many transactions one page of [`list`] holds.
+pub const PAGE_SIZE: usize = 50;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TransactionError {
@@ -60,23 +64,53 @@ pub struct TransactionRecord {
     pub amount: BigDecimal,
     pub asset_id: Uuid,
     pub asset_code: String,
+    pub account_id: Uuid,
+    pub account_name: String,
     pub booking_date: NaiveDate,
     pub value_date: Option<NaiveDate>,
     pub category_name: Option<String>,
     pub merchant_name: Option<String>,
 }
 
-/// The 50 most recent non-deleted transactions on one of the user's accounts,
-/// newest first (`booking_date` then `created_at`).
+/// A keyset cursor: the `(booking_date, id)` of the last row already seen.
+/// [`list`] returns rows strictly ordered after it.
+pub type Cursor = (NaiveDate, Uuid);
+
+/// The filter for [`list`]. Every field is optional; `from` / `to` bound
+/// `booking_date` inclusively.
+#[derive(Default)]
+pub struct TransactionFilter {
+    pub account_id: Option<Uuid>,
+    pub from: Option<NaiveDate>,
+    pub to: Option<NaiveDate>,
+    pub after: Option<Cursor>,
+}
+
+/// One page of [`list`] results, newest first, plus the cursor for the next
+/// page (present only when more rows remain).
+pub struct TransactionListPage {
+    pub records: Vec<TransactionRecord>,
+    pub next: Option<Cursor>,
+}
+
+/// One page of the user's non-deleted transactions matching `filter`, newest
+/// first (`booking_date` then `id`, both descending). `id` is uuidv7 so it
+/// orders by creation time and gives every row a stable total order.
 ///
-/// The account is not checked for existence here; a `account_id` that is not
-/// one of this user's accounts simply matches no rows.
-pub async fn recent_for_account(
+/// Transactions on a soft-deleted account are excluded, matching the
+/// `account_balances` view.
+pub async fn list(
     pool: &PgPool,
     user_id: Uuid,
-    account_id: Uuid,
-) -> Result<Vec<TransactionRecord>, TransactionError> {
-    let records = sqlx::query_as!(
+    filter: TransactionFilter,
+) -> Result<TransactionListPage, TransactionError> {
+    let (after_date, after_id) = match filter.after {
+        Some((date, id)) => (Some(date), Some(id)),
+        None => (None, None),
+    };
+    let limit = PAGE_SIZE as i64 + 1;
+
+    let mut records = sqlx::query_as!(
         TransactionRecord,
         r#"
         SELECT
@@ -84,27 +118,67 @@ pub async fn recent_for_account(
             t.amount,
             t.asset_id,
             a.code AS "asset_code!",
+            t.account_id,
+            acc.account_name AS "account_name!",
             t.booking_date,
             t.value_date,
             c.category_name AS "category_name?",
             m.merchant_name AS "merchant_name?"
         FROM transactions AS t
         INNER JOIN assets AS a ON a.id = t.asset_id
+        INNER JOIN accounts AS acc
+            ON acc.user_id = t.user_id AND acc.id = t.account_id
         LEFT JOIN categories AS c
             ON c.user_id = t.user_id AND c.id = t.category_id AND c.deleted_at IS NULL
         LEFT JOIN merchants AS m
             ON m.user_id = t.user_id AND m.id = t.merchant_id AND m.deleted_at IS NULL
-        WHERE t.user_id = $1 AND t.account_id = $2 AND t.deleted_at IS NULL
-        ORDER BY t.booking_date DESC, t.created_at DESC
-        LIMIT 50
+        WHERE t.user_id = $1
+          AND t.deleted_at IS NULL
+          AND acc.deleted_at IS NULL
+          AND ($2::uuid IS NULL OR t.account_id = $2)
+          AND ($3::date IS NULL OR t.booking_date >= $3)
+          AND ($4::date IS NULL OR t.booking_date <= $4)
+          AND ($5::date IS NULL OR (t.booking_date, t.id) < ($5::date, $6::uuid))
+        ORDER BY t.booking_date DESC, t.id DESC
+        LIMIT $7
         "#,
         user_id,
-        account_id,
+        filter.account_id,
+        filter.from,
+        filter.to,
+        after_date,
+        after_id,
+        limit,
     )
     .fetch_all(pool)
     .await?;
 
-    Ok(records)
+    let next = if records.len() > PAGE_SIZE {
+        records.truncate(PAGE_SIZE);
+        records
+            .last()
+            .map(|record| (record.booking_date, record.id))
+    } else {
+        None
+    };
+
+    Ok(TransactionListPage { records, next })
+}
+
+/// Encode a keyset [`Cursor`] as an opaque `"YYYY-MM-DD_<uuid>"` string for the
+/// browser to hand back verbatim.
+pub fn encode_cursor((booking_date, id): Cursor) -> String {
+    format!("{booking_date}_{id}")
+}
+
+/// Decode a [`Cursor`] produced by [`encode_cursor`]. Any malformed value is
+/// rejected rather than trusted.
+pub fn parse_cursor(input: &str) -> Result<Cursor, TransactionError> {
+    let invalid = || TransactionError::InvalidInput("invalid page cursor");
+    let (date, id) = input.split_once('_').ok_or_else(invalid)?;
+    let date = NaiveDate::parse_from_str(date, "%Y-%m-%d").map_err(|_| invalid())?;
+    let id = Uuid::parse_str(id).map_err(|_| invalid())?;
+    Ok((date, id))
 }
 
 /// Parse and validate a user-supplied `amount` string into an exact decimal.
@@ -154,6 +228,40 @@ pub fn validate_value_date(input: Option<&str>) -> Result<Option<NaiveDate>, Tra
             .map(Some)
             .map_err(|_| TransactionError::InvalidInput("value date is invalid")),
     }
+}
+
+/// Parse the `from` / `to` bounds of a date-range filter. A blank or absent
+/// bound is "unbounded on that side"; both bounds are inclusive. Rejects a
+/// range whose start is after its end.
+pub fn validate_date_range(
+    from: Option<&str>,
+    to: Option<&str>,
+) -> Result<(Option<NaiveDate>, Option<NaiveDate>), TransactionError> {
+    fn parse(value: &str) -> Result<NaiveDate, TransactionError> {
+        NaiveDate::parse_from_str(value.trim(), "%Y-%m-%d")
+            .map_err(|_| TransactionError::InvalidInput("a filter date is invalid"))
+    }
+
+    let from = from
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(parse)
+        .transpose()?;
+    let to = to
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(parse)
+        .transpose()?;
+
+    if let (Some(start), Some(end)) = (from, to) {
+        if start > end {
+            return Err(TransactionError::InvalidInput(
+                "the start date is after the end date",
+            ));
+        }
+    }
+
+    Ok((from, to))
 }
 
 /// Confirm `asset_id` is an active, non-deleted fiat currency (one that
@@ -402,13 +510,45 @@ mod tests {
         );
         assert!(validate_value_date(Some("15/01/2026")).is_err());
     }
+
+    #[test]
+    fn validate_date_range_accepts_open_and_closed_ranges() {
+        assert_eq!(
+            validate_date_range(None, None).expect("valid"),
+            (None, None)
+        );
+        assert_eq!(
+            validate_date_range(Some("  "), Some("2026-01-31")).expect("valid"),
+            (None, Some(NaiveDate::from_ymd_opt(2026, 1, 31).unwrap()))
+        );
+        let (from, to) =
+            validate_date_range(Some("2026-01-01"), Some("2026-01-01")).expect("valid");
+        assert_eq!(from, to);
+    }
+
+    #[test]
+    fn validate_date_range_rejects_a_backwards_range_and_bad_dates() {
+        assert!(validate_date_range(Some("2026-02-01"), Some("2026-01-01")).is_err());
+        assert!(validate_date_range(Some("nonsense"), None).is_err());
+    }
+
+    #[test]
+    fn cursor_round_trips_and_rejects_garbage() {
+        let id = Uuid::parse_str("0193c0f0-1234-7abc-8def-0123456789ab").unwrap();
+        let cursor = (NaiveDate::from_ymd_opt(2026, 1, 15).unwrap(), id);
+        assert_eq!(parse_cursor(&encode_cursor(cursor)).expect("valid"), cursor);
+        assert!(parse_cursor("not-a-cursor").is_err());
+        assert!(parse_cursor("2026-01-15_not-a-uuid").is_err());
+        assert!(parse_cursor("15-01-2026_00000000-0000-0000-0000-000000000000").is_err());
+    }
 }
 
-/// Authorization: every query here is scoped by `user_id`. `recent_for_account`
-/// returns an empty list (not an error) for someone else's `account_id`;
-/// `create` / `update` / `soft_delete` report `NotFound` for a row or account
-/// that is not the caller's, indistinguishable from a missing one. Each
-/// `#[sqlx::test]` runs against its own freshly migrated database.
+/// Authorization: every query here is scoped by `user_id`. `list` returns only
+/// the caller's rows (an `account_id` filter that names someone else's account
+/// just matches nothing); `create` / `update` / `soft_delete` report `NotFound`
+/// for a row or account that is not the caller's, indistinguishable from a
+/// missing one. Each `#[sqlx::test]` runs against its own freshly migrated
+/// database.
 ///
 /// Cross-user category or merchant names cannot leak through the two
 /// `LEFT JOIN`s: `transactions` carries composite foreign keys to
@@ -422,8 +562,27 @@ mod db_tests {
         create_user, currency_id, date, dec, insert_transaction, insert_transfer,
     };
 
+    /// The caller's transactions on one account, newest first (first page).
+    async fn account_rows(
+        pool: &PgPool,
+        user_id: Uuid,
+        account_id: Uuid,
+    ) -> Vec<TransactionRecord> {
+        list(
+            pool,
+            user_id,
+            TransactionFilter {
+                account_id: Some(account_id),
+                ..TransactionFilter::default()
+            },
+        )
+        .await
+        .expect("list runs")
+        .records
+    }
+
     #[sqlx::test]
-    async fn recent_for_account_returns_nothing_for_another_users_account(pool: PgPool) {
+    async fn list_returns_nothing_for_another_users_account(pool: PgPool) {
         let alice = create_user(&pool, "alice@example.test").await;
         let bob = create_user(&pool, "bob@example.test").await;
         let eur = currency_id(&pool, "EUR").await;
@@ -435,22 +594,16 @@ mod db_tests {
         insert_transaction(&pool, alice, account.id, eur, "100.00", date(2026, 1, 15)).await;
         insert_transaction(&pool, alice, account.id, eur, "-25.50", date(2026, 1, 16)).await;
 
-        let denied = recent_for_account(&pool, bob, account.id)
-            .await
-            .expect("query runs");
+        let denied = account_rows(&pool, bob, account.id).await;
         assert!(denied.is_empty());
 
         // Control: the owner sees both rows, so the account really has data.
-        let owned = recent_for_account(&pool, alice, account.id)
-            .await
-            .expect("query runs");
+        let owned = account_rows(&pool, alice, account.id).await;
         assert_eq!(owned.len(), 2);
     }
 
     #[sqlx::test]
-    async fn recent_for_account_does_not_leak_the_callers_own_rows_for_a_foreign_account(
-        pool: PgPool,
-    ) {
+    async fn list_does_not_leak_the_callers_own_rows_for_a_foreign_account(pool: PgPool) {
         let alice = create_user(&pool, "alice@example.test").await;
         let bob = create_user(&pool, "bob@example.test").await;
         let eur = currency_id(&pool, "EUR").await;
@@ -466,20 +619,190 @@ mod db_tests {
         let bobs_transaction =
             insert_transaction(&pool, bob, bobs.id, eur, "42.00", date(2026, 1, 15)).await;
 
-        // Bob asking for Alice's account must get nothing at all -- in
-        // particular not his own rows, which is what a dropped `account_id`
+        // Bob filtering by Alice's account must get nothing at all -- in
+        // particular not his own rows, which is what a dropped `user_id`
         // predicate would return.
-        let records = recent_for_account(&pool, bob, alices.id)
-            .await
-            .expect("query runs");
-        assert!(records.is_empty());
+        assert!(account_rows(&pool, bob, alices.id).await.is_empty());
 
         // Control: Bob's own account still returns his row.
-        let owned = recent_for_account(&pool, bob, bobs.id)
-            .await
-            .expect("query runs");
+        let owned = account_rows(&pool, bob, bobs.id).await;
         assert_eq!(owned.len(), 1);
         assert_eq!(owned[0].id, bobs_transaction);
+    }
+
+    #[sqlx::test]
+    async fn list_is_scoped_to_the_caller_across_all_accounts(pool: PgPool) {
+        let alice = create_user(&pool, "alice@example.test").await;
+        let bob = create_user(&pool, "bob@example.test").await;
+        let eur = currency_id(&pool, "EUR").await;
+
+        let alices = accounts::create(&pool, alice, "Alice Cash", "cash", eur)
+            .await
+            .expect("alice's account");
+        let bobs = accounts::create(&pool, bob, "Bob Cash", "cash", eur)
+            .await
+            .expect("bob's account");
+
+        insert_transaction(&pool, alice, alices.id, eur, "10.00", date(2026, 1, 15)).await;
+        insert_transaction(&pool, alice, alices.id, eur, "20.00", date(2026, 1, 16)).await;
+        insert_transaction(&pool, bob, bobs.id, eur, "99.00", date(2026, 1, 17)).await;
+
+        let page = list(&pool, alice, TransactionFilter::default())
+            .await
+            .expect("list runs");
+        assert_eq!(page.records.len(), 2);
+        assert!(page
+            .records
+            .iter()
+            .all(|record| record.account_id == alices.id));
+        // Newest first.
+        assert_eq!(page.records[0].booking_date, date(2026, 1, 16));
+        assert_eq!(page.next, None);
+    }
+
+    #[sqlx::test]
+    async fn list_filters_by_account(pool: PgPool) {
+        let alice = create_user(&pool, "alice@example.test").await;
+        let eur = currency_id(&pool, "EUR").await;
+        let cash = accounts::create(&pool, alice, "Cash", "cash", eur)
+            .await
+            .expect("cash account");
+        let bank = accounts::create(&pool, alice, "Bank", "bank", eur)
+            .await
+            .expect("bank account");
+
+        insert_transaction(&pool, alice, cash.id, eur, "10.00", date(2026, 1, 15)).await;
+        insert_transaction(&pool, alice, bank.id, eur, "20.00", date(2026, 1, 15)).await;
+
+        let page = list(
+            &pool,
+            alice,
+            TransactionFilter {
+                account_id: Some(bank.id),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("list runs");
+        assert_eq!(page.records.len(), 1);
+        assert_eq!(page.records[0].account_id, bank.id);
+        assert_eq!(page.records[0].account_name, "Bank");
+    }
+
+    #[sqlx::test]
+    async fn list_date_range_is_inclusive_on_both_ends(pool: PgPool) {
+        let alice = create_user(&pool, "alice@example.test").await;
+        let eur = currency_id(&pool, "EUR").await;
+        let account = accounts::create(&pool, alice, "Cash", "cash", eur)
+            .await
+            .expect("account");
+
+        for day in [10, 15, 20, 25] {
+            insert_transaction(&pool, alice, account.id, eur, "1.00", date(2026, 1, day)).await;
+        }
+
+        let page = list(
+            &pool,
+            alice,
+            TransactionFilter {
+                from: Some(date(2026, 1, 15)),
+                to: Some(date(2026, 1, 20)),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("list runs");
+
+        let days: Vec<_> = page
+            .records
+            .iter()
+            .map(|record| record.booking_date)
+            .collect();
+        assert_eq!(days, vec![date(2026, 1, 20), date(2026, 1, 15)]);
+    }
+
+    #[sqlx::test]
+    async fn list_paginates_without_gaps_or_repeats(pool: PgPool) {
+        let alice = create_user(&pool, "alice@example.test").await;
+        let eur = currency_id(&pool, "EUR").await;
+        let account = accounts::create(&pool, alice, "Cash", "cash", eur)
+            .await
+            .expect("account");
+
+        // One more than a page; rows share booking dates so the `id` tiebreak
+        // is what keeps the page boundary clean.
+        let total = PAGE_SIZE + 1;
+        for i in 0..total {
+            let day = 1 + (i % 3) as u32;
+            insert_transaction(&pool, alice, account.id, eur, "1.00", date(2026, 1, day)).await;
+        }
+
+        let first = list(&pool, alice, TransactionFilter::default())
+            .await
+            .expect("list runs");
+        assert_eq!(first.records.len(), PAGE_SIZE);
+        let cursor = first.next.expect("a second page");
+
+        let second = list(
+            &pool,
+            alice,
+            TransactionFilter {
+                after: Some(cursor),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("list runs");
+        assert_eq!(second.records.len(), 1);
+        assert_eq!(second.next, None);
+
+        let seam: Vec<_> = first
+            .records
+            .iter()
+            .chain(&second.records)
+            .map(|record| (record.booking_date, record.id))
+            .collect();
+
+        // Strictly descending by (booking_date, id) across the page boundary…
+        let mut ordered = seam.clone();
+        ordered.sort_by(|a, b| b.cmp(a));
+        assert_eq!(seam, ordered);
+
+        // …and every row exactly once.
+        let mut ids: Vec<_> = seam.iter().map(|(_, id)| *id).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), total);
+    }
+
+    #[sqlx::test]
+    async fn list_excludes_soft_deleted_transactions_and_accounts(pool: PgPool) {
+        let alice = create_user(&pool, "alice@example.test").await;
+        let eur = currency_id(&pool, "EUR").await;
+        let live = accounts::create(&pool, alice, "Live", "cash", eur)
+            .await
+            .expect("live account");
+        let gone = accounts::create(&pool, alice, "Gone", "cash", eur)
+            .await
+            .expect("gone account");
+
+        let kept = insert_transaction(&pool, alice, live.id, eur, "1.00", date(2026, 1, 15)).await;
+        let deleted_txn =
+            insert_transaction(&pool, alice, live.id, eur, "2.00", date(2026, 1, 16)).await;
+        insert_transaction(&pool, alice, gone.id, eur, "3.00", date(2026, 1, 17)).await;
+
+        soft_delete(&pool, alice, deleted_txn)
+            .await
+            .expect("delete transaction");
+        accounts::soft_delete(&pool, alice, gone.id)
+            .await
+            .expect("delete account");
+
+        let page = list(&pool, alice, TransactionFilter::default())
+            .await
+            .expect("list runs");
+        assert_eq!(page.records.len(), 1);
+        assert_eq!(page.records[0].id, kept);
     }
 
     #[sqlx::test]
@@ -518,17 +841,8 @@ mod db_tests {
         assert!(matches!(denied, Err(TransactionError::NotFound)));
 
         // Only Alice's row exists.
-        assert!(recent_for_account(&pool, bob, account.id)
-            .await
-            .expect("query runs")
-            .is_empty());
-        assert_eq!(
-            recent_for_account(&pool, alice, account.id)
-                .await
-                .expect("query runs")
-                .len(),
-            1
-        );
+        assert!(account_rows(&pool, bob, account.id).await.is_empty());
+        assert_eq!(account_rows(&pool, alice, account.id).await.len(), 1);
     }
 
     #[sqlx::test]
@@ -562,9 +876,7 @@ mod db_tests {
         .await
         .expect("with value date");
 
-        let rows = recent_for_account(&pool, alice, account.id)
-            .await
-            .expect("query runs");
+        let rows = account_rows(&pool, alice, account.id).await;
         // Newest first: the 16th (with a value date), then the 15th (without).
         assert_eq!(rows[0].value_date, Some(date(2026, 1, 18)));
         assert_eq!(rows[1].value_date, None);
@@ -595,9 +907,7 @@ mod db_tests {
         .await;
         assert!(matches!(denied, Err(TransactionError::NotFound)));
 
-        let after = recent_for_account(&pool, alice, account.id)
-            .await
-            .expect("query runs");
+        let after = account_rows(&pool, alice, account.id).await;
         assert_eq!(after.len(), 1);
         assert_eq!(after[0].amount, dec("100.00"));
         assert_eq!(after[0].asset_id, eur);
@@ -620,13 +930,7 @@ mod db_tests {
             soft_delete(&pool, bob, transaction).await,
             Err(TransactionError::NotFound)
         ));
-        assert_eq!(
-            recent_for_account(&pool, alice, account.id)
-                .await
-                .expect("query runs")
-                .len(),
-            1
-        );
+        assert_eq!(account_rows(&pool, alice, account.id).await.len(), 1);
 
         // The owner deletes it; a second delete is not a fresh success.
         soft_delete(&pool, alice, transaction)
@@ -702,12 +1006,6 @@ mod db_tests {
         ));
 
         // The legs are untouched.
-        assert_eq!(
-            recent_for_account(&pool, alice, account.id)
-                .await
-                .expect("query runs")
-                .len(),
-            2
-        );
+        assert_eq!(account_rows(&pool, alice, account.id).await.len(), 2);
     }
 }

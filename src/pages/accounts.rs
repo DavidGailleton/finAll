@@ -17,7 +17,7 @@ use crate::components::{Button, FormError, Layout, SelectField, TextField};
 use crate::pages::guard::RequireAuth;
 use crate::pages::server_error_message;
 use crate::transactions::api::{
-    list_account_transactions, CreateTransaction, DeleteTransaction, UpdateTransaction,
+    list_transactions, CreateTransaction, DeleteTransaction, UpdateTransaction,
 };
 use crate::transactions::types::TransactionDto;
 
@@ -370,20 +370,56 @@ fn TransactionsList(account_id: String, default_asset_id: String) -> impl IntoVi
     let edit = ServerAction::<UpdateTransaction>::new();
     let delete = ServerAction::<DeleteTransaction>::new();
 
-    // Refetch after any successful create, edit, or delete by depending on the
-    // actions' versions.
-    let list_account_id = account_id.clone();
-    let transactions = Resource::new(
+    // First page: SSR-rendered, refetched after any successful create / edit /
+    // delete by depending on the actions' versions.
+    let first_account_id = account_id.clone();
+    let first_page = Resource::new(
         move || {
             (
-                list_account_id.clone(),
+                first_account_id.clone(),
                 create.version().get(),
                 edit.version().get(),
                 delete.version().get(),
             )
         },
-        |(account_id, _, _, _)| async move { list_account_transactions(account_id).await },
+        |(account_id, ..)| async move { list_transactions(Some(account_id), None, None, None).await },
     );
+
+    // Later pages, fetched on demand by "Load more" and appended client-side.
+    let extra = RwSignal::new(Vec::<TransactionDto>::new());
+    let next_cursor = RwSignal::new(None::<String>);
+    let more_cursor = RwSignal::new(None::<String>);
+
+    let more_account_id = account_id.clone();
+    let more_page = Resource::new(
+        move || (more_account_id.clone(), more_cursor.get()),
+        |(account_id, cursor)| async move {
+            match cursor {
+                Some(cursor) => list_transactions(Some(account_id), None, None, Some(cursor))
+                    .await
+                    .map(Some),
+                None => Ok(None),
+            }
+        },
+    );
+
+    // The first page (re)loaded: drop any appended pages, reset paging.
+    Effect::new(move |_| {
+        if let Some(Ok(page)) = first_page.get() {
+            extra.set(Vec::new());
+            more_cursor.set(None);
+            next_cursor.set(page.next_cursor);
+        }
+    });
+
+    // A "Load more" fetch returned: append its rows, advance the cursor.
+    Effect::new(move |_| {
+        if let Some(Ok(Some(page))) = more_page.get() {
+            let mut rows = page.transactions;
+            extra.update(|existing| existing.append(&mut rows));
+            next_cursor.set(page.next_cursor);
+        }
+    });
 
     view! {
         <section class="transactions">
@@ -392,7 +428,7 @@ fn TransactionsList(account_id: String, default_asset_id: String) -> impl IntoVi
                 view! { <p class="loading">"Loading transactions…"</p> }
             }>
                 {move || {
-                    transactions
+                    first_page
                         .get()
                         .map(|result| match result {
                             Err(err) => {
@@ -403,7 +439,7 @@ fn TransactionsList(account_id: String, default_asset_id: String) -> impl IntoVi
                                 }
                                     .into_any()
                             }
-                            Ok(list) if list.is_empty() => {
+                            Ok(page) if page.transactions.is_empty() => {
                                 view! {
                                     <p class="empty-state">
                                         "No transactions on this account yet."
@@ -411,7 +447,7 @@ fn TransactionsList(account_id: String, default_asset_id: String) -> impl IntoVi
                                 }
                                     .into_any()
                             }
-                            Ok(list) => {
+                            Ok(page) => {
                                 view! {
                                     <div class="table-scroll">
                                         <table class="transactions-table">
@@ -425,7 +461,8 @@ fn TransactionsList(account_id: String, default_asset_id: String) -> impl IntoVi
                                                 </tr>
                                             </thead>
                                             <tbody>
-                                                {list
+                                                {page
+                                                    .transactions
                                                     .into_iter()
                                                     .map(|transaction| {
                                                         view! {
@@ -437,6 +474,21 @@ fn TransactionsList(account_id: String, default_asset_id: String) -> impl IntoVi
                                                         }
                                                     })
                                                     .collect_view()}
+                                                {move || {
+                                                    extra
+                                                        .get()
+                                                        .into_iter()
+                                                        .map(|transaction| {
+                                                            view! {
+                                                                <TransactionRow
+                                                                    transaction=transaction
+                                                                    edit=edit
+                                                                    delete=delete
+                                                                />
+                                                            }
+                                                        })
+                                                        .collect_view()
+                                                }}
                                             </tbody>
                                         </table>
                                     </div>
@@ -446,6 +498,21 @@ fn TransactionsList(account_id: String, default_asset_id: String) -> impl IntoVi
                         })
                 }}
             </Suspense>
+            {move || {
+                next_cursor
+                    .get()
+                    .map(|cursor| {
+                        view! {
+                            <button
+                                type="button"
+                                class="btn"
+                                on:click=move |_| more_cursor.set(Some(cursor.clone()))
+                            >
+                                "Load more"
+                            </button>
+                        }
+                    })
+            }}
             <AddTransactionForm
                 account_id=account_id
                 default_asset_id=default_asset_id
