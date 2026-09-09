@@ -21,6 +21,7 @@ pub fn Layout(children: Children) -> impl IntoView {
     view! {
         <div class="app-shell">
             <nav class="app-nav">
+                <A href="/">"Home"</A>
                 <A href="/accounts">"Accounts"</A>
                 <A href="/transactions">"Transactions"</A>
                 <A href="/categories">"Categories"</A>

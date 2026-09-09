@@ -6,6 +6,7 @@ pub mod balances;
 pub mod categories;
 pub mod components;
 pub mod merchants;
+pub mod net_worth;
 pub mod pages;
 pub mod transactions;
 pub mod transfers;

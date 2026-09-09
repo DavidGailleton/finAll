@@ -9,6 +9,7 @@ pub mod categories;
 pub mod db;
 pub mod error;
 pub mod merchants;
+pub mod net_worth;
 pub mod transactions;
 pub mod transfers;
 
