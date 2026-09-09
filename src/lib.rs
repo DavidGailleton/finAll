@@ -8,6 +8,7 @@ pub mod components;
 pub mod merchants;
 pub mod pages;
 pub mod transactions;
+pub mod transfers;
 
 #[cfg(feature = "ssr")]
 pub mod server;

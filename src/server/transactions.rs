@@ -78,6 +78,11 @@ pub struct TransactionRecord {
     pub category_name: Option<String>,
     pub merchant_id: Option<Uuid>,
     pub merchant_name: Option<String>,
+    /// Set when this transaction is one leg of a (non-deleted) transfer; the
+    /// UI routes edit / delete to the transfer instead.
+    pub transfer_id: Option<Uuid>,
+    /// The name of the account on the *other* leg of that transfer, for display.
+    pub transfer_counterparty: Option<String>,
 }
 
 /// A keyset cursor: the `(booking_date, id)` of the last row already seen.
@@ -133,7 +138,9 @@ pub async fn list(
             t.category_id,
             c.category_name AS "category_name?",
             t.merchant_id,
-            m.merchant_name AS "merchant_name?"
+            m.merchant_name AS "merchant_name?",
+            tr.id AS "transfer_id?",
+            other_acc.account_name AS "transfer_counterparty?"
         FROM transactions AS t
         INNER JOIN assets AS a ON a.id = t.asset_id
         INNER JOIN accounts AS acc
@@ -142,6 +149,17 @@ pub async fn list(
             ON c.user_id = t.user_id AND c.id = t.category_id AND c.deleted_at IS NULL
         LEFT JOIN merchants AS m
             ON m.user_id = t.user_id AND m.id = t.merchant_id AND m.deleted_at IS NULL
+        LEFT JOIN transfers AS tr
+            ON tr.user_id = t.user_id
+            AND (tr.source_transaction_id = t.id OR tr.destination_transaction_id = t.id)
+            AND tr.deleted_at IS NULL
+        LEFT JOIN transactions AS other
+            ON other.id = CASE
+                WHEN tr.source_transaction_id = t.id THEN tr.destination_transaction_id
+                ELSE tr.source_transaction_id
+            END
+        LEFT JOIN accounts AS other_acc
+            ON other_acc.user_id = t.user_id AND other_acc.id = other.account_id
         WHERE t.user_id = $1
           AND t.deleted_at IS NULL
           AND acc.deleted_at IS NULL
@@ -659,7 +677,7 @@ mod db_tests {
     use crate::server::test_support::{
         create_user, currency_id, date, dec, insert_transaction, insert_transfer,
     };
-    use crate::server::{accounts, categories, merchants};
+    use crate::server::{accounts, categories, merchants, transfers};
 
     /// The caller's transactions on one account, newest first (first page).
     async fn account_rows(
@@ -1105,6 +1123,59 @@ mod db_tests {
 
         // The legs are untouched.
         assert_eq!(account_rows(&pool, alice, account.id).await.len(), 2);
+    }
+
+    #[sqlx::test]
+    async fn list_marks_transfer_legs_with_the_counterparty(pool: PgPool) {
+        let alice = create_user(&pool, "alice@example.test").await;
+        let eur = currency_id(&pool, "EUR").await;
+        let checking = accounts::create(&pool, alice, "Checking", "bank", eur)
+            .await
+            .expect("checking");
+        let savings = accounts::create(&pool, alice, "Savings", "bank", eur)
+            .await
+            .expect("savings");
+        insert_transaction(&pool, alice, checking.id, eur, "5.00", date(2026, 1, 10)).await;
+
+        let transfer_id = transfers::create(
+            &pool,
+            alice,
+            &transfers::TransferWrite {
+                source_account_id: checking.id,
+                destination_account_id: savings.id,
+                source_asset_id: eur,
+                destination_asset_id: eur,
+                source_amount: dec("30"),
+                destination_amount: dec("30"),
+                booking_date: date(2026, 1, 15),
+                value_date: None,
+            },
+        )
+        .await
+        .expect("transfer");
+
+        // The checking leg (newest row) names savings; the plain transaction has
+        // no transfer id.
+        let checking_rows = account_rows(&pool, alice, checking.id).await;
+        assert_eq!(
+            checking_rows[0].transfer_id.map(|id| id.to_string()),
+            Some(transfer_id.to_string())
+        );
+        assert_eq!(
+            checking_rows[0].transfer_counterparty.as_deref(),
+            Some("Savings")
+        );
+        assert_eq!(checking_rows[1].transfer_id, None);
+
+        let savings_rows = account_rows(&pool, alice, savings.id).await;
+        assert_eq!(
+            savings_rows[0].transfer_id.map(|id| id.to_string()),
+            Some(transfer_id.to_string())
+        );
+        assert_eq!(
+            savings_rows[0].transfer_counterparty.as_deref(),
+            Some("Checking")
+        );
     }
 
     #[sqlx::test]
