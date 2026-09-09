@@ -74,8 +74,8 @@ check: ## Type-check the server (ssr) and browser (hydrate) targets
 	$(DEV_EXEC) cargo check --features hydrate --target wasm32-unknown-unknown
 
 lint: ## Run clippy (ssr + hydrate) and sqlfluff on the migrations
-	$(DEV_EXEC) cargo clippy --features ssr
-	$(DEV_EXEC) cargo clippy --features hydrate --target wasm32-unknown-unknown
+	$(DEV_EXEC) cargo clippy --features ssr -- -D warnings
+	$(DEV_EXEC) cargo clippy --features hydrate --target wasm32-unknown-unknown -- -D warnings
 	@if command -v sqlfluff >/dev/null 2>&1; then \
 		sqlfluff lint migrations/; \
 	else \

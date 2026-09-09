@@ -27,7 +27,7 @@ pub async fn signup(
     validate::password(&password)?;
     let display_name = validate::display_name(display_name.as_deref());
 
-    let password_hash = pw::hash_password(&password)?;
+    let password_hash = pw::hash_password(&password).await?;
     let user_id = user::create(&pool, &email, &password_hash, display_name.as_deref()).await?;
 
     let fresh = token::generate()?;
@@ -58,7 +58,7 @@ pub async fn login(email: String, password: String) -> Result<SessionUser, Serve
 
     let account = match record {
         Some(account) => {
-            if !pw::verify_password(&password, &account.password_hash)? {
+            if !pw::verify_password(&password, &account.password_hash).await? {
                 return Err(AuthError::InvalidCredentials.into());
             }
             account
@@ -66,7 +66,7 @@ pub async fn login(email: String, password: String) -> Result<SessionUser, Serve
         None => {
             // Spend comparable time hashing so the response does not reveal
             // whether the email is registered. The result is discarded.
-            if let Err(err) = pw::hash_password(&password) {
+            if let Err(err) = pw::hash_password(&password).await {
                 leptos::logging::error!("auth: timing-equaliser hash failed: {err}");
             }
             return Err(AuthError::InvalidCredentials.into());

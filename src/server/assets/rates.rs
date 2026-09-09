@@ -130,6 +130,11 @@ pub async fn fetch_and_store(pool: &PgPool) -> Result<u64, RatesError> {
         return Ok(0);
     };
 
+    // One fetch is stored as a single all-or-nothing batch: a mid-run failure
+    // rolls the whole run back, and the next tick retries it (still idempotent
+    // through the `ON CONFLICT DO NOTHING`).
+    let mut tx = pool.begin().await?;
+
     let mut inserted = 0_u64;
     let mut skipped = 0_usize;
     for ReferenceRate {
@@ -157,11 +162,13 @@ pub async fn fetch_and_store(pool: &PgPool) -> Result<u64, RatesError> {
             RATE_SOURCE,
             observed_at,
         )
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
 
         inserted += result.rows_affected();
     }
+
+    tx.commit().await?;
 
     if skipped > 0 {
         logging::log!("fx rates: skipped {skipped} currency code(s) with no active fiat asset");

@@ -65,9 +65,9 @@ jobs:
       run: cargo fmt --check
 
     - name: clippy (ssr)
-      run: cargo clippy --features ssr
+      run: cargo clippy --features ssr -- -D warnings
     - name: clippy (hydrate)
-      run: cargo clippy --features hydrate --target wasm32-unknown-unknown
+      run: cargo clippy --features hydrate --target wasm32-unknown-unknown -- -D warnings
 
     - name: check (ssr)
       run: cargo check --features ssr
