@@ -76,3 +76,26 @@ pub async fn insert_transaction(
     .await
     .expect("insert test transaction")
 }
+
+/// Link two existing transactions as the two legs of a transfer and return the
+/// transfer id.
+pub async fn insert_transfer(
+    pool: &PgPool,
+    user_id: Uuid,
+    source_transaction_id: Uuid,
+    destination_transaction_id: Uuid,
+) -> Uuid {
+    sqlx::query_scalar(
+        r#"
+        INSERT INTO transfers (user_id, source_transaction_id, destination_transaction_id)
+        VALUES ($1, $2, $3)
+        RETURNING id
+        "#,
+    )
+    .bind(user_id)
+    .bind(source_transaction_id)
+    .bind(destination_transaction_id)
+    .fetch_one(pool)
+    .await
+    .expect("insert test transfer")
+}

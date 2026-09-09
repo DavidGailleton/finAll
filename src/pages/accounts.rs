@@ -16,7 +16,10 @@ use crate::assets::currency::api::list_currencies;
 use crate::components::{Button, FormError, Layout, SelectField, TextField};
 use crate::pages::guard::RequireAuth;
 use crate::pages::server_error_message;
-use crate::transactions::api::list_account_transactions;
+use crate::transactions::api::{
+    list_account_transactions, CreateTransaction, DeleteTransaction, UpdateTransaction,
+};
+use crate::transactions::types::TransactionDto;
 
 /// `/accounts`
 #[component]
@@ -268,6 +271,7 @@ fn AccountDetail() -> impl IntoView {
                         Ok(account) => {
                             let account_id = account.id.clone();
                             let transactions_account_id = account.id.clone();
+                            let transactions_default_asset_id = account.default_asset_id.clone();
                             let current_type = account.account_type;
                             view! {
                                 <h1>{account.account_name.clone()}</h1>
@@ -311,7 +315,10 @@ fn AccountDetail() -> impl IntoView {
                                     error=delete_error
                                 />
 
-                                <TransactionsList account_id=transactions_account_id />
+                                <TransactionsList
+                                    account_id=transactions_account_id
+                                    default_asset_id=transactions_default_asset_id
+                                />
                             }
                                 .into_any()
                         }
@@ -358,10 +365,24 @@ fn DeleteAccountForm(
 }
 
 #[component]
-fn TransactionsList(account_id: String) -> impl IntoView {
+fn TransactionsList(account_id: String, default_asset_id: String) -> impl IntoView {
+    let create = ServerAction::<CreateTransaction>::new();
+    let edit = ServerAction::<UpdateTransaction>::new();
+    let delete = ServerAction::<DeleteTransaction>::new();
+
+    // Refetch after any successful create, edit, or delete by depending on the
+    // actions' versions.
+    let list_account_id = account_id.clone();
     let transactions = Resource::new(
-        move || account_id.clone(),
-        |account_id| async move { list_account_transactions(account_id).await },
+        move || {
+            (
+                list_account_id.clone(),
+                create.version().get(),
+                edit.version().get(),
+                delete.version().get(),
+            )
+        },
+        |(account_id, _, _, _)| async move { list_account_transactions(account_id).await },
     );
 
     view! {
@@ -400,6 +421,7 @@ fn TransactionsList(account_id: String) -> impl IntoView {
                                                     <th scope="col">"Merchant"</th>
                                                     <th scope="col">"Category"</th>
                                                     <th scope="col">"Amount"</th>
+                                                    <th scope="col">"Actions"</th>
                                                 </tr>
                                             </thead>
                                             <tbody>
@@ -407,26 +429,11 @@ fn TransactionsList(account_id: String) -> impl IntoView {
                                                     .into_iter()
                                                     .map(|transaction| {
                                                         view! {
-                                                            <tr>
-                                                                <td>{transaction.booking_date}</td>
-                                                                <td>
-                                                                    {transaction
-                                                                        .merchant_name
-                                                                        .unwrap_or_else(|| "—".to_owned())}
-                                                                </td>
-                                                                <td>
-                                                                    {transaction
-                                                                        .category_name
-                                                                        .unwrap_or_else(|| "—".to_owned())}
-                                                                </td>
-                                                                <td class="transaction-amount">
-                                                                    {format!(
-                                                                        "{} {}",
-                                                                        transaction.amount,
-                                                                        transaction.asset_code,
-                                                                    )}
-                                                                </td>
-                                                            </tr>
+                                                            <TransactionRow
+                                                                transaction=transaction
+                                                                edit=edit
+                                                                delete=delete
+                                                            />
                                                         }
                                                     })
                                                     .collect_view()}
@@ -439,6 +446,302 @@ fn TransactionsList(account_id: String) -> impl IntoView {
                         })
                 }}
             </Suspense>
+            <AddTransactionForm
+                account_id=account_id
+                default_asset_id=default_asset_id
+                action=create
+            />
         </section>
+    }
+}
+
+#[component]
+fn TransactionRow(
+    transaction: TransactionDto,
+    edit: ServerAction<UpdateTransaction>,
+    delete: ServerAction<DeleteTransaction>,
+) -> impl IntoView {
+    let editing = RwSignal::new(false);
+
+    // Close the edit form once its save succeeds.
+    Effect::new(move |_| {
+        if matches!(edit.value().get(), Some(Ok(_))) {
+            editing.set(false);
+        }
+    });
+
+    let booking_date = transaction.booking_date.clone();
+    let merchant = transaction
+        .merchant_name
+        .clone()
+        .unwrap_or_else(|| "—".to_owned());
+    let category = transaction
+        .category_name
+        .clone()
+        .unwrap_or_else(|| "—".to_owned());
+    let amount_display = format!("{} {}", transaction.amount, transaction.asset_code);
+    let transaction_id = transaction.id.clone();
+
+    view! {
+        <tr>
+            <td>{booking_date}</td>
+            <td>{merchant}</td>
+            <td>{category}</td>
+            <td class="transaction-amount">{amount_display}</td>
+            <td class="transaction-actions">
+                <button
+                    type="button"
+                    class="btn"
+                    on:click=move |_| editing.update(|open| *open = !*open)
+                >
+                    {move || if editing.get() { "Cancel" } else { "Edit" }}
+                </button>
+                <DeleteTransactionForm transaction_id=transaction_id action=delete />
+                <Show when=move || editing.get() fallback=|| ()>
+                    <EditTransactionForm transaction=transaction.clone() action=edit />
+                </Show>
+            </td>
+        </tr>
+    }
+}
+
+#[component]
+fn EditTransactionForm(
+    transaction: TransactionDto,
+    action: ServerAction<UpdateTransaction>,
+) -> impl IntoView {
+    // Only mounted while a row is being edited, so fetch the currency list on
+    // mount.
+    let currencies = Resource::new(|| (), |_| async move { list_currencies().await });
+
+    let error = Signal::derive(move || match action.value().get() {
+        Some(Err(err)) => Some(server_error_message(&err)),
+        _ => None,
+    });
+
+    view! {
+        <Suspense fallback=|| {
+            view! { <p class="loading">"Loading currencies…"</p> }
+        }>
+            {move || {
+                let transaction = transaction.clone();
+                currencies
+                    .get()
+                    .map(move |result| match result {
+                        Err(err) => {
+                            view! {
+                                <p class="form-error" role="alert">
+                                    {server_error_message(&err)}
+                                </p>
+                            }
+                                .into_any()
+                        }
+                        Ok(currency_list) => {
+                            let selected = transaction.asset_id.clone();
+                            let value_date = transaction.value_date.clone().unwrap_or_default();
+                            view! {
+                                <ActionForm action=action>
+                                    <input type="hidden" name="id" value=transaction.id.clone() />
+                                    <TextField
+                                        label="Booking date"
+                                        name="booking_date"
+                                        input_type="date"
+                                        value=transaction.booking_date.clone()
+                                    />
+                                    <TextField
+                                        label="Value date"
+                                        name="value_date"
+                                        input_type="date"
+                                        required=false
+                                        value=value_date
+                                    />
+                                    <TextField
+                                        label="Amount"
+                                        name="amount"
+                                        value=transaction.amount.clone()
+                                    />
+                                    <SelectField label="Currency" name="asset_id">
+                                        {currency_list
+                                            .into_iter()
+                                            .map(move |currency| {
+                                                let is_selected = currency.id == selected;
+                                                view! {
+                                                    <option value=currency.id selected=is_selected>
+                                                        {format!(
+                                                            "{} — {}",
+                                                            currency.alphabetic_code,
+                                                            currency.currency_name,
+                                                        )}
+                                                    </option>
+                                                }
+                                            })
+                                            .collect_view()}
+                                    </SelectField>
+                                    <FormError message=error />
+                                    <Button pending=action.pending()>"Save"</Button>
+                                </ActionForm>
+                            }
+                                .into_any()
+                        }
+                    })
+            }}
+        </Suspense>
+    }
+}
+
+#[component]
+fn DeleteTransactionForm(
+    transaction_id: String,
+    action: ServerAction<DeleteTransaction>,
+) -> impl IntoView {
+    let confirming = RwSignal::new(false);
+    let transaction_id = RwSignal::new(transaction_id);
+
+    let error = Signal::derive(move || match action.value().get() {
+        Some(Err(err)) => Some(server_error_message(&err)),
+        _ => None,
+    });
+
+    view! {
+        <Show
+            when=move || confirming.get()
+            fallback=move || {
+                view! {
+                    <button type="button" class="btn" on:click=move |_| confirming.set(true)>
+                        "Delete"
+                    </button>
+                }
+            }
+        >
+            <ActionForm action=action>
+                <input type="hidden" name="id" value=move || transaction_id.get() />
+                <FormError message=error />
+                <Button pending=action.pending()>"Confirm delete"</Button>
+                <button type="button" class="btn" on:click=move |_| confirming.set(false)>
+                    "Cancel"
+                </button>
+            </ActionForm>
+        </Show>
+    }
+}
+
+#[component]
+fn AddTransactionForm(
+    account_id: String,
+    default_asset_id: String,
+    action: ServerAction<CreateTransaction>,
+) -> impl IntoView {
+    let adding = RwSignal::new(false);
+
+    // Collapse the form once a transaction is recorded.
+    Effect::new(move |_| {
+        if matches!(action.value().get(), Some(Ok(_))) {
+            adding.set(false);
+        }
+    });
+
+    let error = Signal::derive(move || match action.value().get() {
+        Some(Err(err)) => Some(server_error_message(&err)),
+        _ => None,
+    });
+
+    // Only fetch the currency list once the form is opened.
+    let currencies = Resource::new(
+        move || adding.get(),
+        |adding| async move {
+            if adding {
+                list_currencies().await
+            } else {
+                Ok(Vec::new())
+            }
+        },
+    );
+
+    let account_id = RwSignal::new(account_id);
+    let default_asset_id = RwSignal::new(default_asset_id);
+
+    view! {
+        <div class="add-transaction">
+            <Show
+                when=move || adding.get()
+                fallback=move || {
+                    view! {
+                        <button type="button" class="btn" on:click=move |_| adding.set(true)>
+                            "Add transaction"
+                        </button>
+                    }
+                }
+            >
+                <Suspense fallback=|| {
+                    view! { <p class="loading">"Loading currencies…"</p> }
+                }>
+                    {move || {
+                        currencies
+                            .get()
+                            .map(|result| match result {
+                                Err(err) => {
+                                    view! {
+                                        <p class="form-error" role="alert">
+                                            {server_error_message(&err)}
+                                        </p>
+                                    }
+                                        .into_any()
+                                }
+                                Ok(currency_list) => {
+                                    let selected = default_asset_id.get();
+                                    view! {
+                                        <ActionForm action=action>
+                                            <input
+                                                type="hidden"
+                                                name="account_id"
+                                                value=move || account_id.get()
+                                            />
+                                            <TextField
+                                                label="Booking date"
+                                                name="booking_date"
+                                                input_type="date"
+                                            />
+                                            <TextField
+                                                label="Value date"
+                                                name="value_date"
+                                                input_type="date"
+                                                required=false
+                                            />
+                                            <TextField label="Amount" name="amount" />
+                                            <SelectField label="Currency" name="asset_id">
+                                                {currency_list
+                                                    .into_iter()
+                                                    .map(move |currency| {
+                                                        let is_selected = currency.id == selected;
+                                                        view! {
+                                                            <option value=currency.id selected=is_selected>
+                                                                {format!(
+                                                                    "{} — {}",
+                                                                    currency.alphabetic_code,
+                                                                    currency.currency_name,
+                                                                )}
+                                                            </option>
+                                                        }
+                                                    })
+                                                    .collect_view()}
+                                            </SelectField>
+                                            <FormError message=error />
+                                            <Button pending=action.pending()>"Add transaction"</Button>
+                                            <button
+                                                type="button"
+                                                class="btn"
+                                                on:click=move |_| adding.set(false)
+                                            >
+                                                "Cancel"
+                                            </button>
+                                        </ActionForm>
+                                    }
+                                        .into_any()
+                                }
+                            })
+                    }}
+                </Suspense>
+            </Show>
+        </div>
     }
 }
