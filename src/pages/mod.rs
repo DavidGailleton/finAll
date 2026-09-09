@@ -1,16 +1,22 @@
 //! Routed pages. Shared between SSR and hydration.
 
 mod accounts;
+mod categories;
 mod guard;
 mod home;
 mod login;
+mod merchants;
 mod signup;
+mod transactions;
 
 pub use accounts::{AccountDetailPage, AccountsPage};
+pub use categories::CategoriesPage;
 pub use guard::RequireAuth;
 pub use home::HomePage;
 pub use login::LoginPage;
+pub use merchants::MerchantsPage;
 pub use signup::SignupPage;
+pub use transactions::TransactionsPage;
 
 use leptos::prelude::ServerFnError;
 

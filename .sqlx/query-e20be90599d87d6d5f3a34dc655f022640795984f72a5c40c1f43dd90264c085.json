@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, merchant_name, default_category_id\n        FROM merchants\n        WHERE user_id = $1 AND deleted_at IS NULL\n        ORDER BY merchant_name\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "merchants",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "merchant_name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "merchants",
+            "name": "merchant_name"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "default_category_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "merchants",
+            "name": "default_category_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "e20be90599d87d6d5f3a34dc655f022640795984f72a5c40c1f43dd90264c085"
+}
