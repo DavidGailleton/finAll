@@ -10,6 +10,7 @@ pub mod db;
 pub mod error;
 pub mod merchants;
 pub mod transactions;
+pub mod transfers;
 
 #[cfg(test)]
 mod test_support;
