@@ -8,6 +8,7 @@ pub mod balances;
 pub mod categories;
 pub mod db;
 pub mod error;
+pub mod merchants;
 pub mod transactions;
 
 #[cfg(test)]

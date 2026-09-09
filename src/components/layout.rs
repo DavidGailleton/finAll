@@ -24,6 +24,7 @@ pub fn Layout(children: Children) -> impl IntoView {
                 <A href="/accounts">"Accounts"</A>
                 <A href="/transactions">"Transactions"</A>
                 <A href="/categories">"Categories"</A>
+                <A href="/merchants">"Merchants"</A>
                 <div class="app-nav-footer">
                     <ActionForm action=action>
                         <Button pending=action.pending()>"Log out"</Button>

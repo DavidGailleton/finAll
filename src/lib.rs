@@ -5,6 +5,7 @@ pub mod auth;
 pub mod balances;
 pub mod categories;
 pub mod components;
+pub mod merchants;
 pub mod pages;
 pub mod transactions;
 

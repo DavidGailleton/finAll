@@ -5,6 +5,7 @@ mod categories;
 mod guard;
 mod home;
 mod login;
+mod merchants;
 mod signup;
 mod transactions;
 
@@ -13,6 +14,7 @@ pub use categories::CategoriesPage;
 pub use guard::RequireAuth;
 pub use home::HomePage;
 pub use login::LoginPage;
+pub use merchants::MerchantsPage;
 pub use signup::SignupPage;
 pub use transactions::TransactionsPage;
 
