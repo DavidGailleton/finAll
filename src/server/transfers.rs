@@ -13,9 +13,11 @@
 //! `default_asset_id`, exactly like a plain transaction.
 //!
 //! Transfer legs carry no category or merchant: a transfer is neither income nor
-//! an expense. Editing or deleting a transfer is not built;
-//! [`crate::server::transactions::update`] / `soft_delete` already refuse to
-//! touch a single leg directly.
+//! an expense. [`update`] changes both legs' amounts, currencies, and dates at
+//! once (not the accounts); [`void`] soft-deletes both legs and the `transfers`
+//! row together, so the two balances revert and the rows stay for audit.
+//! [`crate::server::transactions::update`] / `soft_delete` still refuse to touch
+//! a single leg directly.
 
 use bigdecimal::Zero;
 use leptos::logging;
@@ -31,7 +33,10 @@ pub enum TransferError {
     Unauthorized,
 
     #[error("account not found")]
-    NotFound,
+    AccountNotFound,
+
+    #[error("transfer not found")]
+    TransferNotFound,
 
     #[error("you cannot transfer money to the same account")]
     SameAccount,
@@ -93,8 +98,8 @@ pub struct TransferWrite {
 /// Confirm `account_id` is one of the user's non-deleted accounts.
 ///
 /// Scoping by `user_id` is the authorization check: another user's account is
-/// reported as [`TransferError::NotFound`], indistinguishable from a missing
-/// one.
+/// reported as [`TransferError::AccountNotFound`], indistinguishable from a
+/// missing one.
 async fn assert_account_exists(
     conn: &mut PgConnection,
     user_id: Uuid,
@@ -113,7 +118,7 @@ async fn assert_account_exists(
     .await?;
 
     if found.is_none() {
-        return Err(TransferError::NotFound);
+        return Err(TransferError::AccountNotFound);
     }
 
     Ok(())
@@ -184,10 +189,10 @@ async fn insert_leg(
 /// legs and the linking `transfers` row in a single database transaction.
 ///
 /// Returns [`TransferError::SameAccount`] if the two accounts are the same,
-/// [`TransferError::NotFound`] if either account is not one of this user's
-/// non-deleted accounts, and [`TransferError::UnknownAsset`] if either leg's
-/// currency is not an active fiat currency. On any error the transaction is
-/// rolled back, so a partial transfer is never persisted.
+/// [`TransferError::AccountNotFound`] if either account is not one of this
+/// user's non-deleted accounts, and [`TransferError::UnknownAsset`] if either
+/// leg's currency is not an active fiat currency. On any error the transaction
+/// is rolled back, so a partial transfer is never persisted.
 pub async fn create(
     pool: &PgPool,
     user_id: Uuid,
@@ -246,6 +251,214 @@ pub async fn create(
     Ok(transfer_id)
 }
 
+/// One transfer assembled from its two legs, for the edit form. The amounts are
+/// positive magnitudes — the stored source leg is negative, and [`get`] flips it
+/// back.
+pub struct TransferRecord {
+    pub id: Uuid,
+    pub source_account_id: Uuid,
+    pub source_asset_id: Uuid,
+    pub source_amount: BigDecimal,
+    pub destination_account_id: Uuid,
+    pub destination_asset_id: Uuid,
+    pub destination_amount: BigDecimal,
+    pub booking_date: NaiveDate,
+    pub value_date: Option<NaiveDate>,
+}
+
+/// Load one of the user's non-deleted transfers by id, scoped by `user_id`
+/// (another user's transfer is reported as [`TransferError::TransferNotFound`]).
+pub async fn get(pool: &PgPool, user_id: Uuid, id: Uuid) -> Result<TransferRecord, TransferError> {
+    let record = sqlx::query_as!(
+        TransferRecord,
+        r#"
+        SELECT
+            tr.id,
+            s.account_id AS source_account_id,
+            s.asset_id AS source_asset_id,
+            -s.amount AS "source_amount!",
+            d.account_id AS destination_account_id,
+            d.asset_id AS destination_asset_id,
+            d.amount AS destination_amount,
+            d.booking_date,
+            d.value_date
+        FROM transfers AS tr
+        INNER JOIN transactions AS s ON s.id = tr.source_transaction_id
+        INNER JOIN transactions AS d ON d.id = tr.destination_transaction_id
+        WHERE tr.id = $1 AND tr.user_id = $2 AND tr.deleted_at IS NULL
+        "#,
+        id,
+        user_id,
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    record.ok_or(TransferError::TransferNotFound)
+}
+
+/// The editable fields of a transfer: both legs' currency and amount, plus the
+/// shared dates. The two accounts are not editable — void the transfer and make
+/// a new one to move it.
+pub struct TransferEdit {
+    pub source_asset_id: Uuid,
+    pub destination_asset_id: Uuid,
+    pub source_amount: BigDecimal,
+    pub destination_amount: BigDecimal,
+    pub booking_date: NaiveDate,
+    pub value_date: Option<NaiveDate>,
+}
+
+/// The two leg transaction ids of one of the user's non-deleted transfers.
+async fn leg_ids(
+    conn: &mut PgConnection,
+    user_id: Uuid,
+    transfer_id: Uuid,
+) -> Result<(Uuid, Uuid), TransferError> {
+    let row = sqlx::query!(
+        r#"
+        SELECT source_transaction_id, destination_transaction_id
+        FROM transfers
+        WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
+        "#,
+        transfer_id,
+        user_id,
+    )
+    .fetch_optional(&mut *conn)
+    .await?
+    .ok_or(TransferError::TransferNotFound)?;
+
+    Ok((row.source_transaction_id, row.destination_transaction_id))
+}
+
+/// Overwrite one leg's currency, amount, and dates. `amount` is stored verbatim
+/// (already signed by the caller).
+async fn update_leg(
+    conn: &mut PgConnection,
+    user_id: Uuid,
+    id: Uuid,
+    asset_id: Uuid,
+    amount: &BigDecimal,
+    booking_date: NaiveDate,
+    value_date: Option<NaiveDate>,
+) -> Result<(), TransferError> {
+    sqlx::query!(
+        r#"
+        UPDATE transactions
+        SET asset_id = $3,
+            amount = $4,
+            booking_date = $5,
+            value_date = $6,
+            updated_at = now()
+        WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
+        "#,
+        id,
+        user_id,
+        asset_id,
+        amount,
+        booking_date,
+        value_date,
+    )
+    .execute(&mut *conn)
+    .await?;
+
+    Ok(())
+}
+
+/// Update both legs of one of the user's transfers — their currencies, amounts,
+/// and dates — in one database transaction. The two accounts are left unchanged.
+///
+/// Returns [`TransferError::TransferNotFound`] if the id is not one of this
+/// user's non-deleted transfers, and [`TransferError::UnknownAsset`] if either
+/// currency is not an active fiat currency.
+pub async fn update(
+    pool: &PgPool,
+    user_id: Uuid,
+    id: Uuid,
+    edit: &TransferEdit,
+) -> Result<(), TransferError> {
+    let mut tx = pool.begin().await?;
+
+    let (source_leg, destination_leg) = leg_ids(&mut tx, user_id, id).await?;
+
+    assert_currency_exists(&mut tx, edit.source_asset_id).await?;
+    assert_currency_exists(&mut tx, edit.destination_asset_id).await?;
+
+    update_leg(
+        &mut tx,
+        user_id,
+        source_leg,
+        edit.source_asset_id,
+        &(-edit.source_amount.clone()),
+        edit.booking_date,
+        edit.value_date,
+    )
+    .await?;
+
+    update_leg(
+        &mut tx,
+        user_id,
+        destination_leg,
+        edit.destination_asset_id,
+        &edit.destination_amount,
+        edit.booking_date,
+        edit.value_date,
+    )
+    .await?;
+
+    sqlx::query!(
+        r#"
+        UPDATE transfers SET updated_at = now() WHERE id = $1 AND user_id = $2
+        "#,
+        id,
+        user_id,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    Ok(())
+}
+
+/// Void one of the user's transfers: soft-delete both leg transactions and the
+/// `transfers` row together, in one database transaction. Both balances revert;
+/// nothing is hard-deleted and no compensating transactions are created.
+///
+/// Returns [`TransferError::TransferNotFound`] if the id is not one of this
+/// user's non-deleted transfers, so voiding twice is not a fresh success.
+pub async fn void(pool: &PgPool, user_id: Uuid, id: Uuid) -> Result<(), TransferError> {
+    let mut tx = pool.begin().await?;
+
+    let (source_leg, destination_leg) = leg_ids(&mut tx, user_id, id).await?;
+
+    sqlx::query!(
+        r#"
+        UPDATE transactions
+        SET deleted_at = now()
+        WHERE (id = $1 OR id = $2) AND user_id = $3 AND deleted_at IS NULL
+        "#,
+        source_leg,
+        destination_leg,
+        user_id,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query!(
+        r#"
+        UPDATE transfers SET deleted_at = now() WHERE id = $1 AND user_id = $2
+        "#,
+        id,
+        user_id,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    Ok(())
+}
+
 /// Pure-input validation tests.
 #[cfg(test)]
 mod tests {
@@ -264,9 +477,10 @@ mod tests {
 }
 
 /// Authorization: every query is scoped by `user_id`. `assert_account_exists`
-/// reports an account that is not the caller's as `NotFound`, so `create` cannot
-/// move money into or out of another user's account. Each `#[sqlx::test]` runs
-/// against its own freshly migrated database.
+/// reports an account that is not the caller's as `AccountNotFound`, and `get` /
+/// `update` / `void` report another user's transfer as `TransferNotFound`, so a
+/// user can neither read nor change another's transfer. Each `#[sqlx::test]`
+/// runs against its own freshly migrated database.
 #[cfg(test)]
 mod db_tests {
     use super::*;
@@ -418,7 +632,7 @@ mod db_tests {
 
         assert!(matches!(
             create(&pool, alice, &write(alices.id, bobs.id, eur, "10")).await,
-            Err(TransferError::NotFound)
+            Err(TransferError::AccountNotFound)
         ));
 
         // The source leg was never written: an invalid destination rolls the
@@ -453,5 +667,155 @@ mod db_tests {
         // Nothing was written: the currency is checked before either insert.
         assert!(account_rows(&pool, alice, checking.id).await.is_empty());
         assert!(account_rows(&pool, alice, savings.id).await.is_empty());
+    }
+
+    /// Alice with two EUR accounts and one transfer between them.
+    async fn alice_with_a_transfer(pool: &PgPool) -> (Uuid, Uuid, Uuid, Uuid, Uuid) {
+        let alice = create_user(pool, "alice@example.test").await;
+        let eur = currency_id(pool, "EUR").await;
+        let checking = accounts::create(pool, alice, "Checking", "bank", eur)
+            .await
+            .expect("checking")
+            .id;
+        let savings = accounts::create(pool, alice, "Savings", "bank", eur)
+            .await
+            .expect("savings")
+            .id;
+        let transfer = create(pool, alice, &write(checking, savings, eur, "30"))
+            .await
+            .expect("transfer");
+        (alice, eur, checking, savings, transfer)
+    }
+
+    #[sqlx::test]
+    async fn get_returns_positive_magnitudes_for_both_legs(pool: PgPool) {
+        let (alice, eur, checking, savings, transfer) = alice_with_a_transfer(&pool).await;
+
+        let record = get(&pool, alice, transfer).await.expect("get");
+        assert_eq!(record.source_account_id, checking);
+        assert_eq!(record.destination_account_id, savings);
+        assert_eq!(record.source_asset_id, eur);
+        assert_eq!(record.destination_asset_id, eur);
+        assert_eq!(record.source_amount, dec("30"));
+        assert_eq!(record.destination_amount, dec("30"));
+        assert_eq!(record.booking_date, date(2026, 1, 15));
+        assert_eq!(record.value_date, None);
+    }
+
+    #[sqlx::test]
+    async fn update_changes_amounts_and_currencies_and_leaves_the_accounts(pool: PgPool) {
+        let (alice, eur, checking, savings, transfer) = alice_with_a_transfer(&pool).await;
+        let usd = currency_id(&pool, "USD").await;
+
+        update(
+            &pool,
+            alice,
+            transfer,
+            &TransferEdit {
+                source_asset_id: eur,
+                destination_asset_id: usd,
+                source_amount: dec("25"),
+                destination_amount: dec("27.50"),
+                booking_date: date(2026, 2, 1),
+                value_date: Some(date(2026, 2, 2)),
+            },
+        )
+        .await
+        .expect("update");
+
+        let source = account_rows(&pool, alice, checking).await;
+        assert_eq!(source[0].amount, dec("-25"));
+        assert_eq!(source[0].asset_id, eur);
+        assert_eq!(source[0].booking_date, date(2026, 2, 1));
+        assert_eq!(source[0].value_date, Some(date(2026, 2, 2)));
+
+        let destination = account_rows(&pool, alice, savings).await;
+        assert_eq!(destination[0].amount, dec("27.50"));
+        assert_eq!(destination[0].asset_id, usd);
+
+        // The accounts are untouched: get still points at the same two.
+        let record = get(&pool, alice, transfer).await.expect("get");
+        assert_eq!(record.source_account_id, checking);
+        assert_eq!(record.destination_account_id, savings);
+    }
+
+    #[sqlx::test]
+    async fn update_rejects_an_unknown_currency(pool: PgPool) {
+        let (alice, eur, _, _, transfer) = alice_with_a_transfer(&pool).await;
+
+        assert!(matches!(
+            update(
+                &pool,
+                alice,
+                transfer,
+                &TransferEdit {
+                    source_asset_id: Uuid::nil(),
+                    destination_asset_id: eur,
+                    source_amount: dec("1"),
+                    destination_amount: dec("1"),
+                    booking_date: date(2026, 1, 15),
+                    value_date: None,
+                },
+            )
+            .await,
+            Err(TransferError::UnknownAsset)
+        ));
+
+        // The legs are unchanged.
+        let record = get(&pool, alice, transfer).await.expect("get");
+        assert_eq!(record.source_amount, dec("30"));
+    }
+
+    #[sqlx::test]
+    async fn void_soft_deletes_both_legs_and_the_transfer(pool: PgPool) {
+        let (alice, _, checking, savings, transfer) = alice_with_a_transfer(&pool).await;
+
+        void(&pool, alice, transfer).await.expect("void");
+
+        assert_eq!(balance(&pool, checking).await, None);
+        assert_eq!(balance(&pool, savings).await, None);
+        assert!(account_rows(&pool, alice, checking).await.is_empty());
+        assert!(get(&pool, alice, transfer).await.is_err());
+
+        // Voiding again is not a fresh success.
+        assert!(matches!(
+            void(&pool, alice, transfer).await,
+            Err(TransferError::TransferNotFound)
+        ));
+    }
+
+    #[sqlx::test]
+    async fn get_update_and_void_deny_another_users_transfer(pool: PgPool) {
+        let (_, eur, checking, _, transfer) = alice_with_a_transfer(&pool).await;
+        let bob = create_user(&pool, "bob@example.test").await;
+
+        assert!(matches!(
+            get(&pool, bob, transfer).await,
+            Err(TransferError::TransferNotFound)
+        ));
+        assert!(matches!(
+            update(
+                &pool,
+                bob,
+                transfer,
+                &TransferEdit {
+                    source_asset_id: eur,
+                    destination_asset_id: eur,
+                    source_amount: dec("1"),
+                    destination_amount: dec("1"),
+                    booking_date: date(2026, 1, 15),
+                    value_date: None,
+                },
+            )
+            .await,
+            Err(TransferError::TransferNotFound)
+        ));
+        assert!(matches!(
+            void(&pool, bob, transfer).await,
+            Err(TransferError::TransferNotFound)
+        ));
+
+        // Alice's transfer is untouched.
+        assert_eq!(balance(&pool, checking).await, Some(dec("-30")));
     }
 }

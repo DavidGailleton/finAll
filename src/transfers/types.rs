@@ -13,3 +13,14 @@ pub struct TransferLeg {
     pub asset_id: String,
     pub amount: String,
 }
+
+/// One of the user's transfers, assembled from its two legs, for the edit form.
+/// The `amount` on each leg is a positive magnitude.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TransferDetailDto {
+    pub id: String,
+    pub source: TransferLeg,
+    pub destination: TransferLeg,
+    pub booking_date: String,
+    pub value_date: Option<String>,
+}

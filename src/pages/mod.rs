@@ -4,6 +4,7 @@ mod accounts;
 mod categories;
 mod guard;
 mod home;
+mod ledger;
 mod login;
 mod merchants;
 mod signup;

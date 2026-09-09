@@ -91,6 +91,8 @@ pub async fn list_transactions(
                 category_name: record.category_name,
                 merchant_id: record.merchant_id.map(|id| id.to_string()),
                 merchant_name: record.merchant_name,
+                transfer_id: record.transfer_id.map(|id| id.to_string()),
+                transfer_counterparty: record.transfer_counterparty,
             })
             .collect(),
         next_cursor: page.next.map(transactions::encode_cursor),

@@ -45,6 +45,11 @@ pub struct TransactionDto {
     /// The merchant name, if the transaction has one and the merchant is still
     /// active.
     pub merchant_name: Option<String>,
+    /// Id of the transfer this transaction is a leg of, if any. When set, the
+    /// row is shown as a transfer and its actions edit / void the transfer.
+    pub transfer_id: Option<String>,
+    /// Name of the account on the other leg of that transfer, for display.
+    pub transfer_counterparty: Option<String>,
 }
 
 /// One page of a transaction list, plus the opaque cursor to fetch the next
