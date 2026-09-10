@@ -21,7 +21,7 @@ use crate::components::{
 };
 use crate::pages::guard::RequireAuth;
 use crate::pages::ledger::{
-    AccountContext, AddTransactionForm, AddTransferForm, LedgerActions, LedgerFilter, LedgerTable,
+    AccountContext, AddTransactionForm, LedgerActions, LedgerFilter, LedgerTable,
 };
 use crate::pages::server_error_message;
 
@@ -372,9 +372,8 @@ fn AccountDetail() -> impl IntoView {
                 ledger_actions.create_transaction.version().get(),
                 ledger_actions.update_transaction.version().get(),
                 ledger_actions.delete_transaction.version().get(),
-                ledger_actions.create_transfer.version().get(),
-                ledger_actions.update_transfer.version().get(),
-                ledger_actions.void_transfer.version().get(),
+                ledger_actions.link_transfer.version().get(),
+                ledger_actions.unlink_transfer.version().get(),
             )
         },
         |(id, ..)| async move { account_balance(id).await },
@@ -553,8 +552,7 @@ fn DeleteAccountForm(
 }
 
 /// The transaction ledger for one account: the shared [`LedgerTable`] fixed to
-/// this account (no Account column), plus the "Add transaction" and "Add
-/// transfer" forms.
+/// this account (no Account column), plus the "Add transaction" form.
 #[component]
 fn TransactionsList(
     account_id: String,
@@ -574,11 +572,7 @@ fn TransactionsList(
 
     view! {
         <div class="ledger-actions">
-            <AddTransactionForm
-                fixed_account=account_context.clone()
-                action=actions.create_transaction
-            />
-            <AddTransferForm default_source=account_context action=actions.create_transfer />
+            <AddTransactionForm fixed_account=account_context action=actions.create_transaction />
         </div>
         <LedgerTable filter=filter show_account=false actions=actions />
     }

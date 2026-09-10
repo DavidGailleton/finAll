@@ -46,9 +46,6 @@ pub enum TransactionError {
     #[error("the selected merchant does not exist")]
     UnknownMerchant,
 
-    #[error("this transaction is part of a transfer; edit or delete the transfer instead")]
-    PartOfTransfer,
-
     #[error("{0}")]
     InvalidInput(&'static str),
 
@@ -79,7 +76,7 @@ pub struct TransactionRecord {
     pub merchant_id: Option<Uuid>,
     pub merchant_name: Option<String>,
     /// Set when this transaction is one leg of a (non-deleted) transfer; the
-    /// UI routes edit / delete to the transfer instead.
+    /// row is then shown as a transfer.
     pub transfer_id: Option<Uuid>,
     /// The name of the account on the *other* leg of that transfer, for display.
     pub transfer_counterparty: Option<String>,
@@ -370,35 +367,6 @@ async fn assert_merchant_exists(
     Ok(())
 }
 
-/// Reject a transaction that is one leg of a (non-deleted) transfer: a plain
-/// edit or delete of a single leg would leave the transfer half-broken, so the
-/// caller is told to act on the transfer instead.
-async fn assert_not_transfer_leg(
-    pool: &PgPool,
-    user_id: Uuid,
-    id: Uuid,
-) -> Result<(), TransactionError> {
-    let leg = sqlx::query_scalar!(
-        r#"
-        SELECT id
-        FROM transfers
-        WHERE user_id = $1
-          AND (source_transaction_id = $2 OR destination_transaction_id = $2)
-          AND deleted_at IS NULL
-        "#,
-        user_id,
-        id,
-    )
-    .fetch_optional(pool)
-    .await?;
-
-    if leg.is_some() {
-        return Err(TransactionError::PartOfTransfer);
-    }
-
-    Ok(())
-}
-
 /// The mutable fields of a transaction, shared by [`create`] and [`update`] so
 /// neither grows a long list of positional arguments (in particular two
 /// same-typed `Option<Uuid>` next to each other). The account is not here: a
@@ -495,18 +463,19 @@ pub async fn create(
 /// written on every call — `None` clears the column.
 ///
 /// Returns [`TransactionError::NotFound`] if the id is not one of this user's
-/// non-deleted transactions, [`TransactionError::PartOfTransfer`] if it is a
-/// transfer leg, [`TransactionError::UnknownAsset`] if the currency is not
-/// valid, and [`TransactionError::UnknownCategory`] /
+/// non-deleted transactions, [`TransactionError::UnknownAsset`] if the currency
+/// is not valid, and [`TransactionError::UnknownCategory`] /
 /// [`TransactionError::UnknownMerchant`] if a supplied `category_id` /
 /// `merchant_id` is not one of the user's active rows.
+///
+/// A transaction that is one leg of a transfer is edited here like any other:
+/// the transfer is only a link between the two rows and is left untouched.
 pub async fn update(
     pool: &PgPool,
     user_id: Uuid,
     id: Uuid,
     write: &TransactionWrite,
 ) -> Result<(), TransactionError> {
-    assert_not_transfer_leg(pool, user_id, id).await?;
     assert_write_targets_exist(pool, user_id, write).await?;
 
     let row = match sqlx::query!(
@@ -551,11 +520,14 @@ pub async fn update(
 /// Soft-delete the user's transaction by setting `deleted_at`. It then drops
 /// out of the `account_balances` view like any other non-existent row.
 ///
+/// If the transaction is one leg of a transfer, that transfer link is removed
+/// first (in the same database transaction), leaving the other leg as an
+/// ordinary transaction.
+///
 /// Returns [`TransactionError::NotFound`] if the id is not one of this user's
-/// non-deleted transactions, and [`TransactionError::PartOfTransfer`] if it is
-/// a transfer leg.
+/// non-deleted transactions.
 pub async fn soft_delete(pool: &PgPool, user_id: Uuid, id: Uuid) -> Result<(), TransactionError> {
-    assert_not_transfer_leg(pool, user_id, id).await?;
+    let mut tx = pool.begin().await?;
 
     let result = sqlx::query!(
         r#"
@@ -566,12 +538,26 @@ pub async fn soft_delete(pool: &PgPool, user_id: Uuid, id: Uuid) -> Result<(), T
         id,
         user_id,
     )
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
 
     if result.rows_affected() == 0 {
         return Err(TransactionError::NotFound);
     }
+
+    sqlx::query!(
+        r#"
+        DELETE FROM transfers
+        WHERE user_id = $1
+          AND (source_transaction_id = $2 OR destination_transaction_id = $2)
+        "#,
+        user_id,
+        id,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
 
     Ok(())
 }
@@ -677,7 +663,7 @@ mod db_tests {
     use crate::server::test_support::{
         create_user, currency_id, date, dec, insert_transaction, insert_transfer,
     };
-    use crate::server::{accounts, categories, merchants, transfers};
+    use crate::server::{accounts, categories, merchants};
 
     /// The caller's transactions on one account, newest first (first page).
     async fn account_rows(
@@ -1093,36 +1079,63 @@ mod db_tests {
     }
 
     #[sqlx::test]
-    async fn update_and_soft_delete_refuse_a_transfer_leg(pool: PgPool) {
+    async fn a_transfer_leg_is_edited_like_any_other_transaction(pool: PgPool) {
         let alice = create_user(&pool, "alice@example.test").await;
         let eur = currency_id(&pool, "EUR").await;
-        let account = accounts::create(&pool, alice, "Alice Cash", "cash", eur)
+        let checking = accounts::create(&pool, alice, "Checking", "bank", eur)
             .await
-            .expect("alice's account");
+            .expect("checking");
+        let savings = accounts::create(&pool, alice, "Savings", "bank", eur)
+            .await
+            .expect("savings");
 
         let source =
-            insert_transaction(&pool, alice, account.id, eur, "-10.00", date(2026, 1, 15)).await;
+            insert_transaction(&pool, alice, checking.id, eur, "-10.00", date(2026, 1, 15)).await;
         let destination =
-            insert_transaction(&pool, alice, account.id, eur, "10.00", date(2026, 1, 15)).await;
+            insert_transaction(&pool, alice, savings.id, eur, "10.00", date(2026, 1, 15)).await;
+        let transfer_id = insert_transfer(&pool, alice, source, destination).await;
+
+        update(
+            &pool,
+            alice,
+            source,
+            &write(eur, "-5.00", date(2026, 1, 16)),
+        )
+        .await
+        .expect("editing a leg is allowed");
+
+        let rows = account_rows(&pool, alice, checking.id).await;
+        assert_eq!(rows[0].amount, dec("-5.00"));
+        // The leg is still linked to the same transfer.
+        assert_eq!(rows[0].transfer_id, Some(transfer_id));
+    }
+
+    #[sqlx::test]
+    async fn deleting_a_transfer_leg_removes_the_link(pool: PgPool) {
+        let alice = create_user(&pool, "alice@example.test").await;
+        let eur = currency_id(&pool, "EUR").await;
+        let checking = accounts::create(&pool, alice, "Checking", "bank", eur)
+            .await
+            .expect("checking");
+        let savings = accounts::create(&pool, alice, "Savings", "bank", eur)
+            .await
+            .expect("savings");
+
+        let source =
+            insert_transaction(&pool, alice, checking.id, eur, "-10.00", date(2026, 1, 15)).await;
+        let destination =
+            insert_transaction(&pool, alice, savings.id, eur, "10.00", date(2026, 1, 15)).await;
         insert_transfer(&pool, alice, source, destination).await;
 
-        assert!(matches!(
-            update(
-                &pool,
-                alice,
-                source,
-                &write(eur, "-5.00", date(2026, 1, 15))
-            )
-            .await,
-            Err(TransactionError::PartOfTransfer)
-        ));
-        assert!(matches!(
-            soft_delete(&pool, alice, destination).await,
-            Err(TransactionError::PartOfTransfer)
-        ));
+        soft_delete(&pool, alice, source)
+            .await
+            .expect("deleting a leg is allowed");
 
-        // The legs are untouched.
-        assert_eq!(account_rows(&pool, alice, account.id).await.len(), 2);
+        // The deleted leg is gone; the surviving leg is a plain transaction.
+        assert!(account_rows(&pool, alice, checking.id).await.is_empty());
+        let survivor = account_rows(&pool, alice, savings.id).await;
+        assert_eq!(survivor.len(), 1);
+        assert_eq!(survivor[0].transfer_id, None);
     }
 
     #[sqlx::test]
@@ -1137,22 +1150,11 @@ mod db_tests {
             .expect("savings");
         insert_transaction(&pool, alice, checking.id, eur, "5.00", date(2026, 1, 10)).await;
 
-        let transfer_id = transfers::create(
-            &pool,
-            alice,
-            &transfers::TransferWrite {
-                source_account_id: checking.id,
-                destination_account_id: savings.id,
-                source_asset_id: eur,
-                destination_asset_id: eur,
-                source_amount: dec("30"),
-                destination_amount: dec("30"),
-                booking_date: date(2026, 1, 15),
-                value_date: None,
-            },
-        )
-        .await
-        .expect("transfer");
+        let source =
+            insert_transaction(&pool, alice, checking.id, eur, "-30", date(2026, 1, 15)).await;
+        let destination =
+            insert_transaction(&pool, alice, savings.id, eur, "30", date(2026, 1, 15)).await;
+        let transfer_id = insert_transfer(&pool, alice, source, destination).await;
 
         // The checking leg (newest row) names savings; the plain transaction has
         // no transfer id.

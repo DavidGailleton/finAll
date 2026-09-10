@@ -747,8 +747,10 @@ mod tests {
 #[cfg(test)]
 mod db_tests {
     use super::*;
-    use crate::server::test_support::{create_user, currency_id, date, dec, insert_transaction};
-    use crate::server::{accounts, categories, transactions, transfers};
+    use crate::server::test_support::{
+        create_user, currency_id, date, dec, insert_transaction, insert_transfer,
+    };
+    use crate::server::{accounts, categories, transactions};
 
     fn midnight_utc(year: i32, month: u32, day: u32) -> DateTime<Utc> {
         let naive = NaiveDate::from_ymd_opt(year, month, day)
@@ -934,22 +936,11 @@ mod db_tests {
             .await
             .expect("report");
 
-        transfers::create(
-            &pool,
-            alice,
-            &transfers::TransferWrite {
-                source_account_id: checking.id,
-                destination_account_id: savings.id,
-                source_asset_id: eur,
-                destination_asset_id: eur,
-                source_amount: dec("300"),
-                destination_amount: dec("300"),
-                booking_date: date(2026, 1, 10),
-                value_date: None,
-            },
-        )
-        .await
-        .expect("transfer");
+        let source =
+            insert_transaction(&pool, alice, checking.id, eur, "-300", date(2026, 1, 10)).await;
+        let destination =
+            insert_transaction(&pool, alice, savings.id, eur, "300", date(2026, 1, 10)).await;
+        insert_transfer(&pool, alice, source, destination).await;
 
         let after = report(&pool, alice, "EUR", "2026-01-01", "2026-01-31")
             .await

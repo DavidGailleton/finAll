@@ -46,7 +46,8 @@ pub struct TransactionDto {
     /// active.
     pub merchant_name: Option<String>,
     /// Id of the transfer this transaction is a leg of, if any. When set, the
-    /// row is shown as a transfer and its actions edit / void the transfer.
+    /// row is shown as a transfer (the transaction is still edited and deleted
+    /// on its own).
     pub transfer_id: Option<String>,
     /// Name of the account on the other leg of that transfer, for display.
     pub transfer_counterparty: Option<String>,

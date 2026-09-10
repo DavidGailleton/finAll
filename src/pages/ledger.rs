@@ -1,11 +1,12 @@
 //! The shared transaction ledger: the table of transactions plus the add /
-//! edit / delete forms for transactions **and** transfers. Used by both
-//! `/accounts/:id` (one account, no Account column) and `/transactions` (every
-//! account, with an Account column and filters).
+//! edit / delete forms. Used by both `/accounts/:id` (one account, no Account
+//! column) and `/transactions` (every account, with an Account column and
+//! filters).
 //!
 //! A row whose transaction is one leg of a transfer is shown as a transfer —
-//! labelled, naming the other account — and its actions edit or void the whole
-//! transfer rather than the single leg.
+//! labelled, naming the other account. It is still edited and deleted as an
+//! ordinary transaction; the transfer is only a link, made and broken from the
+//! edit form's "Paired transaction" field.
 
 use leptos::prelude::*;
 use leptos_router::components::A;
@@ -22,7 +23,7 @@ use crate::transactions::api::{
     list_transactions, CreateTransaction, DeleteTransaction, UpdateTransaction,
 };
 use crate::transactions::types::TransactionDto;
-use crate::transfers::api::{get_transfer, CreateTransfer, UpdateTransfer, VoidTransfer};
+use crate::transfers::api::{paired_transaction_options, LinkTransfer, UnlinkTransfer};
 
 /// The account a transaction is being added on, when it is fixed (the
 /// `/accounts/:id` page). Absent on `/transactions`, where the form shows an
@@ -33,16 +34,15 @@ pub struct AccountContext {
     pub default_asset_id: String,
 }
 
-/// The six server actions the ledger drives. `ServerAction` is `Copy`, so this
+/// The server actions the ledger drives. `ServerAction` is `Copy`, so this
 /// bundle is passed by value and its `.version()`s key the list's refetch.
 #[derive(Clone, Copy)]
 pub struct LedgerActions {
     pub create_transaction: ServerAction<CreateTransaction>,
     pub update_transaction: ServerAction<UpdateTransaction>,
     pub delete_transaction: ServerAction<DeleteTransaction>,
-    pub create_transfer: ServerAction<CreateTransfer>,
-    pub update_transfer: ServerAction<UpdateTransfer>,
-    pub void_transfer: ServerAction<VoidTransfer>,
+    pub link_transfer: ServerAction<LinkTransfer>,
+    pub unlink_transfer: ServerAction<UnlinkTransfer>,
 }
 
 impl LedgerActions {
@@ -51,9 +51,8 @@ impl LedgerActions {
             create_transaction: ServerAction::new(),
             update_transaction: ServerAction::new(),
             delete_transaction: ServerAction::new(),
-            create_transfer: ServerAction::new(),
-            update_transfer: ServerAction::new(),
-            void_transfer: ServerAction::new(),
+            link_transfer: ServerAction::new(),
+            unlink_transfer: ServerAction::new(),
         }
     }
 }
@@ -97,9 +96,8 @@ pub fn LedgerTable(
                 actions.create_transaction.version().get(),
                 actions.update_transaction.version().get(),
                 actions.delete_transaction.version().get(),
-                actions.create_transfer.version().get(),
-                actions.update_transfer.version().get(),
-                actions.void_transfer.version().get(),
+                actions.link_transfer.version().get(),
+                actions.unlink_transfer.version().get(),
             )
         },
         |(account_id, from, to, ..)| async move {
@@ -268,10 +266,11 @@ fn TransactionRow(
     let editing = RwSignal::new(false);
     let is_transfer = transaction.transfer_id.is_some();
 
-    // Close the edit form once its save (transaction or transfer) succeeds.
+    // Close the edit form once a save, a link, or an unlink succeeds.
     Effect::new(move |_| {
         if matches!(actions.update_transaction.value().get(), Some(Ok(_)))
-            || matches!(actions.update_transfer.value().get(), Some(Ok(_)))
+            || matches!(actions.link_transfer.value().get(), Some(Ok(_)))
+            || matches!(actions.unlink_transfer.value().get(), Some(Ok(_)))
         {
             editing.set(false);
         }
@@ -283,7 +282,6 @@ fn TransactionRow(
     let amount_is_negative = transaction.amount.starts_with('-');
     let amount = transaction.amount.clone();
     let asset_code = transaction.asset_code.clone();
-    let transfer_id = transaction.transfer_id.clone().unwrap_or_default();
     let transaction_id = transaction.id.clone();
 
     let (label_cell, detail_cell) = if is_transfer {
@@ -345,69 +343,35 @@ fn TransactionRow(
                         aria-expanded=move || if editing.get() { "true" } else { "false" }
                         on:click=move |_| editing.update(|open| *open = !*open)
                     >
-                        {move || {
-                            if editing.get() {
-                                "Cancel"
-                            } else if is_transfer {
-                                "Edit transfer"
-                            } else {
-                                "Edit"
-                            }
-                        }}
+                        {move || if editing.get() { "Cancel" } else { "Edit" }}
                     </button>
-                    {if is_transfer {
-                        view! {
-                            <VoidTransferForm
-                                transfer_id=transfer_id.clone()
-                                action=actions.void_transfer
-                            />
-                        }
-                            .into_any()
-                    } else {
-                        view! {
-                            <DeleteTransactionForm
-                                transaction_id=transaction_id.clone()
-                                action=actions.delete_transaction
-                            />
-                        }
-                            .into_any()
-                    }}
+                    {view! {
+                        <DeleteTransactionForm
+                            transaction_id=transaction_id.clone()
+                            is_transfer=is_transfer
+                            action=actions.delete_transaction
+                        />
+                    }
+                        .into_any()}
                 </div>
-                {if is_transfer {
-                    view! {
-                        <Show when=move || editing.get() fallback=|| ()>
-                            <div class="row-form">
-                                <EditTransferForm
-                                    transfer_id=transfer_id.clone()
-                                    action=actions.update_transfer
-                                />
-                            </div>
-                        </Show>
-                    }
-                        .into_any()
-                } else {
-                    view! {
-                        <Show when=move || editing.get() fallback=|| ()>
-                            <div class="row-form">
-                                <EditTransactionForm
-                                    transaction=dto_for_edit.clone()
-                                    action=actions.update_transaction
-                                />
-                            </div>
-                        </Show>
-                    }
-                        .into_any()
-                }}
+                {view! {
+                    <Show when=move || editing.get() fallback=|| ()>
+                        <div class="row-form">
+                            <EditTransactionForm transaction=dto_for_edit.clone() actions=actions />
+                        </div>
+                    </Show>
+                }
+                    .into_any()}
             </td>
         </tr>
     }
 }
 
 #[component]
-fn EditTransactionForm(
-    transaction: TransactionDto,
-    action: ServerAction<UpdateTransaction>,
-) -> impl IntoView {
+fn EditTransactionForm(transaction: TransactionDto, actions: LedgerActions) -> impl IntoView {
+    let action = actions.update_transaction;
+    let transaction_id = transaction.id.clone();
+
     // Only mounted while a row is being edited, so fetch the pick lists on mount.
     let form_data = Resource::new(
         || (),
@@ -494,6 +458,113 @@ fn EditTransactionForm(
                     })
             }}
         </Suspense>
+        <PairedTransactionField
+            transaction_id=transaction_id
+            link=actions.link_transfer
+            unlink=actions.unlink_transfer
+        />
+    }
+}
+
+/// The "Paired transaction" field of the edit form: link this transaction to a
+/// matching one in another account, or clear the link. It acts on change (its
+/// own server actions), separately from the transaction's own "Save".
+#[component]
+fn PairedTransactionField(
+    transaction_id: String,
+    link: ServerAction<LinkTransfer>,
+    unlink: ServerAction<UnlinkTransfer>,
+) -> impl IntoView {
+    let id_for_options = transaction_id.clone();
+    let options = Resource::new(
+        move || {
+            (
+                id_for_options.clone(),
+                link.version().get(),
+                unlink.version().get(),
+            )
+        },
+        |(id, ..)| async move { paired_transaction_options(id).await },
+    );
+
+    let error = Signal::derive(move || match (link.value().get(), unlink.value().get()) {
+        (Some(Err(err)), _) | (_, Some(Err(err))) => Some(server_error_message(&err)),
+        _ => None,
+    });
+
+    view! {
+        <div class="field">
+            <label for="paired_transaction">"Paired transaction"</label>
+            <Suspense fallback=|| {
+                view! { <select id="paired_transaction" disabled></select> }
+            }>
+                {move || {
+                    let transaction_id = transaction_id.clone();
+                    options
+                        .get()
+                        .map(move |result| match result {
+                            Err(err) => {
+                                view! { <p class="form-error">{server_error_message(&err)}</p> }
+                                    .into_any()
+                            }
+                            Ok(options) => {
+                                let selected = options
+                                    .current_pair
+                                    .as_ref()
+                                    .map(|pair| pair.transaction_id.clone())
+                                    .unwrap_or_default();
+                                view! {
+                                    <select
+                                        id="paired_transaction"
+                                        aria-describedby="paired_transaction_hint"
+                                        prop:value=selected.clone()
+                                        on:change=move |ev| {
+                                            let picked = event_target_value(&ev);
+                                            if picked.is_empty() {
+                                                unlink
+                                                    .dispatch(UnlinkTransfer {
+                                                        transaction_id: transaction_id.clone(),
+                                                    });
+                                            } else {
+                                                link.dispatch(LinkTransfer {
+                                                    transaction_id: transaction_id.clone(),
+                                                    paired_transaction_id: picked,
+                                                });
+                                            }
+                                        }
+                                    >
+                                        <option value="">"Not a transfer"</option>
+                                        {options
+                                            .current_pair
+                                            .map(|pair| {
+                                                view! {
+                                                    <option value=pair.transaction_id selected=true>
+                                                        {pair.label}
+                                                    </option>
+                                                }
+                                            })}
+                                        {options
+                                            .candidates
+                                            .into_iter()
+                                            .map(|candidate| {
+                                                view! {
+                                                    <option value=candidate
+                                                        .transaction_id>{candidate.label}</option>
+                                                }
+                                            })
+                                            .collect_view()}
+                                    </select>
+                                }
+                                    .into_any()
+                            }
+                        })
+                }}
+            </Suspense>
+            <p class="field__hint" id="paired_transaction_hint">
+                "Link this to the matching transaction in another account to mark them a transfer."
+            </p>
+            <FormError message=error />
+        </div>
     }
 }
 
@@ -570,6 +641,9 @@ fn CategoryMerchantFields(
 #[component]
 fn DeleteTransactionForm(
     transaction_id: String,
+    /// When this transaction is one leg of a transfer, deleting it also breaks
+    /// the link; the confirm step says so.
+    is_transfer: bool,
     action: ServerAction<DeleteTransaction>,
 ) -> impl IntoView {
     let confirming = RwSignal::new(false);
@@ -598,6 +672,14 @@ fn DeleteTransactionForm(
         >
             <ActionForm action=action>
                 <input type="hidden" name="id" value=move || transaction_id.get() />
+                {is_transfer
+                    .then(|| {
+                        view! {
+                            <p class="field-note">
+                                "This transaction is part of a transfer. Deleting it also removes the transfer link."
+                            </p>
+                        }
+                    })}
                 <FormError message=error />
                 <div class="form-actions">
                     <Button variant="danger" small=true pending=action.pending()>
@@ -814,405 +896,5 @@ pub fn AddTransactionForm(
                 </Suspense>
             </Show>
         </div>
-    }
-}
-
-#[component]
-pub fn AddTransferForm(
-    /// Pre-select this account (and its currency) as the "From" side. Used on
-    /// `/accounts/:id`; omitted on `/transactions`.
-    #[prop(optional)]
-    default_source: Option<AccountContext>,
-    action: ServerAction<CreateTransfer>,
-) -> impl IntoView {
-    let adding = RwSignal::new(false);
-
-    Effect::new(move |_| {
-        if matches!(action.value().get(), Some(Ok(_))) {
-            adding.set(false);
-        }
-    });
-
-    let error = Signal::derive(move || match action.value().get() {
-        Some(Err(err)) => Some(server_error_message(&err)),
-        _ => None,
-    });
-
-    let form_data = Resource::new(
-        move || adding.get(),
-        |adding| async move {
-            if !adding {
-                return Ok::<_, ServerFnError>((Vec::new(), Vec::new()));
-            }
-            let accounts = list_accounts().await?;
-            let currencies = list_currencies().await?;
-            Ok((accounts, currencies))
-        },
-    );
-
-    let (initial_source_account, initial_source_currency) = default_source
-        .map(|account| (account.id, account.default_asset_id))
-        .unwrap_or_default();
-    let source_account = RwSignal::new(initial_source_account);
-    let source_currency = RwSignal::new(initial_source_currency);
-    let destination_account = RwSignal::new(String::new());
-    let destination_currency = RwSignal::new(String::new());
-
-    view! {
-        <div class="disclosure add-form">
-            <Show
-                when=move || adding.get()
-                fallback=move || {
-                    view! {
-                        <button
-                            type="button"
-                            class="btn"
-                            aria-expanded="false"
-                            on:click=move |_| adding.set(true)
-                        >
-                            "Add transfer"
-                        </button>
-                    }
-                }
-            >
-                <Suspense fallback=|| {
-                    view! { <p class="loading">"Loading…"</p> }
-                }>
-                    {move || {
-                        form_data
-                            .get()
-                            .map(|result| match result {
-                                Err(err) => {
-                                    view! {
-                                        <p class="form-error">{server_error_message(&err)}</p>
-                                    }
-                                        .into_any()
-                                }
-                                Ok((account_list, currency_list)) => {
-                                    let source_accounts = account_list.clone();
-                                    let destination_accounts = account_list.clone();
-                                    let source_account_options = account_list.clone();
-                                    let destination_account_options = account_list.clone();
-                                    let source_currency_options = currency_list.clone();
-                                    view! {
-                                        <ActionForm action=action>
-                                            <fieldset>
-                                                <legend>"From"</legend>
-                                                <div class="field">
-                                                    <label for="source-account">"Account"</label>
-                                                    <select
-                                                        id="source-account"
-                                                        name="source[account_id]"
-                                                        prop:value=move || source_account.get()
-                                                        on:change=move |ev| {
-                                                            let picked = event_target_value(&ev);
-                                                            if let Some(account) = source_accounts
-                                                                .iter()
-                                                                .find(|account| account.id == picked)
-                                                            {
-                                                                source_currency.set(account.default_asset_id.clone());
-                                                            }
-                                                            source_account.set(picked);
-                                                        }
-                                                    >
-                                                        <option value="">"Select an account"</option>
-                                                        {source_account_options
-                                                            .into_iter()
-                                                            .map(|account| {
-                                                                let this_id = account.id.clone();
-                                                                view! {
-                                                                    <option
-                                                                        value=account.id
-                                                                        disabled=move || destination_account.get() == this_id
-                                                                    >
-                                                                        {account.account_name}
-                                                                    </option>
-                                                                }
-                                                            })
-                                                            .collect_view()}
-                                                    </select>
-                                                </div>
-                                                <div class="field">
-                                                    <label for="source-currency">"Currency"</label>
-                                                    <select
-                                                        id="source-currency"
-                                                        name="source[asset_id]"
-                                                        prop:value=move || source_currency.get()
-                                                        on:change=move |ev| {
-                                                            source_currency.set(event_target_value(&ev))
-                                                        }
-                                                    >
-                                                        <option value="">"Select a currency"</option>
-                                                        {source_currency_options
-                                                            .into_iter()
-                                                            .map(|currency| {
-                                                                view! {
-                                                                    <option value=currency.id>
-                                                                        {format!(
-                                                                            "{} — {}",
-                                                                            currency.alphabetic_code,
-                                                                            currency.currency_name,
-                                                                        )}
-                                                                    </option>
-                                                                }
-                                                            })
-                                                            .collect_view()}
-                                                    </select>
-                                                </div>
-                                                <TextField label="Amount" name="source[amount]" />
-                                            </fieldset>
-                                            <fieldset>
-                                                <legend>"To"</legend>
-                                                <div class="field">
-                                                    <label for="destination-account">"Account"</label>
-                                                    <select
-                                                        id="destination-account"
-                                                        name="destination[account_id]"
-                                                        prop:value=move || destination_account.get()
-                                                        on:change=move |ev| {
-                                                            let picked = event_target_value(&ev);
-                                                            if let Some(account) = destination_accounts
-                                                                .iter()
-                                                                .find(|account| account.id == picked)
-                                                            {
-                                                                destination_currency
-                                                                    .set(account.default_asset_id.clone());
-                                                            }
-                                                            destination_account.set(picked);
-                                                        }
-                                                    >
-                                                        <option value="">"Select an account"</option>
-                                                        {destination_account_options
-                                                            .into_iter()
-                                                            .map(|account| {
-                                                                let this_id = account.id.clone();
-                                                                view! {
-                                                                    <option
-                                                                        value=account.id
-                                                                        disabled=move || source_account.get() == this_id
-                                                                    >
-                                                                        {account.account_name}
-                                                                    </option>
-                                                                }
-                                                            })
-                                                            .collect_view()}
-                                                    </select>
-                                                </div>
-                                                <div class="field">
-                                                    <label for="destination-currency">"Currency"</label>
-                                                    <select
-                                                        id="destination-currency"
-                                                        name="destination[asset_id]"
-                                                        prop:value=move || destination_currency.get()
-                                                        on:change=move |ev| {
-                                                            destination_currency.set(event_target_value(&ev))
-                                                        }
-                                                    >
-                                                        <option value="">"Select a currency"</option>
-                                                        {currency_list
-                                                            .into_iter()
-                                                            .map(|currency| {
-                                                                view! {
-                                                                    <option value=currency.id>
-                                                                        {format!(
-                                                                            "{} — {}",
-                                                                            currency.alphabetic_code,
-                                                                            currency.currency_name,
-                                                                        )}
-                                                                    </option>
-                                                                }
-                                                            })
-                                                            .collect_view()}
-                                                    </select>
-                                                </div>
-                                                <TextField label="Amount" name="destination[amount]" />
-                                            </fieldset>
-                                            <TextField
-                                                label="Booking date"
-                                                name="booking_date"
-                                                input_type="date"
-                                            />
-                                            <TextField
-                                                label="Value date"
-                                                name="value_date"
-                                                input_type="date"
-                                                required=false
-                                            />
-                                            <FormError message=error />
-                                            <div class="form-actions">
-                                                <Button pending=action.pending()>"Add transfer"</Button>
-                                                <button
-                                                    type="button"
-                                                    class="btn btn--secondary"
-                                                    on:click=move |_| adding.set(false)
-                                                >
-                                                    "Cancel"
-                                                </button>
-                                            </div>
-                                        </ActionForm>
-                                    }
-                                        .into_any()
-                                }
-                            })
-                    }}
-                </Suspense>
-            </Show>
-        </div>
-    }
-}
-
-#[component]
-fn EditTransferForm(transfer_id: String, action: ServerAction<UpdateTransfer>) -> impl IntoView {
-    let id_for_resource = transfer_id.clone();
-    let data = Resource::new(
-        move || id_for_resource.clone(),
-        |id| async move {
-            let transfer = get_transfer(id).await?;
-            let currencies = list_currencies().await?;
-            Ok::<_, ServerFnError>((transfer, currencies))
-        },
-    );
-
-    let error = Signal::derive(move || match action.value().get() {
-        Some(Err(err)) => Some(server_error_message(&err)),
-        _ => None,
-    });
-
-    view! {
-        <Suspense fallback=|| {
-            view! { <p class="loading">"Loading…"</p> }
-        }>
-            {move || {
-                data.get()
-                    .map(|result| match result {
-                        Err(err) => {
-                            view! { <p class="form-error">{server_error_message(&err)}</p> }
-                                .into_any()
-                        }
-                        Ok((transfer, currency_list)) => {
-                            let source_asset = transfer.source.asset_id.clone();
-                            let destination_asset = transfer.destination.asset_id.clone();
-                            let source_currencies = currency_list.clone();
-                            view! {
-                                <ActionForm action=action>
-                                    <input type="hidden" name="id" value=transfer.id.clone() />
-                                    <p class="field-note">
-                                        "The two accounts can't be changed here — void this transfer and create a new one to move it."
-                                    </p>
-                                    <TextField
-                                        label="Booking date"
-                                        name="booking_date"
-                                        input_type="date"
-                                        value=transfer.booking_date.clone()
-                                    />
-                                    <TextField
-                                        label="Value date"
-                                        name="value_date"
-                                        input_type="date"
-                                        required=false
-                                        value=transfer.value_date.clone().unwrap_or_default()
-                                    />
-                                    <TextField
-                                        label="Amount leaving source"
-                                        name="source_amount"
-                                        value=transfer.source.amount.clone()
-                                    />
-                                    <SelectField label="Source currency" name="source_asset_id">
-                                        {source_currencies
-                                            .into_iter()
-                                            .map(move |currency| {
-                                                let is_selected = currency.id == source_asset;
-                                                view! {
-                                                    <option value=currency.id selected=is_selected>
-                                                        {format!(
-                                                            "{} — {}",
-                                                            currency.alphabetic_code,
-                                                            currency.currency_name,
-                                                        )}
-                                                    </option>
-                                                }
-                                            })
-                                            .collect_view()}
-                                    </SelectField>
-                                    <TextField
-                                        label="Amount arriving at destination"
-                                        name="destination_amount"
-                                        value=transfer.destination.amount.clone()
-                                    />
-                                    <SelectField
-                                        label="Destination currency"
-                                        name="destination_asset_id"
-                                    >
-                                        {currency_list
-                                            .into_iter()
-                                            .map(move |currency| {
-                                                let is_selected = currency.id == destination_asset;
-                                                view! {
-                                                    <option value=currency.id selected=is_selected>
-                                                        {format!(
-                                                            "{} — {}",
-                                                            currency.alphabetic_code,
-                                                            currency.currency_name,
-                                                        )}
-                                                    </option>
-                                                }
-                                            })
-                                            .collect_view()}
-                                    </SelectField>
-                                    <FormError message=error />
-                                    <Button pending=action.pending()>"Save transfer"</Button>
-                                </ActionForm>
-                            }
-                                .into_any()
-                        }
-                    })
-            }}
-        </Suspense>
-    }
-}
-
-#[component]
-fn VoidTransferForm(transfer_id: String, action: ServerAction<VoidTransfer>) -> impl IntoView {
-    let confirming = RwSignal::new(false);
-    let transfer_id = RwSignal::new(transfer_id);
-
-    let error = Signal::derive(move || match action.value().get() {
-        Some(Err(err)) => Some(server_error_message(&err)),
-        _ => None,
-    });
-
-    view! {
-        <Show
-            when=move || confirming.get()
-            fallback=move || {
-                view! {
-                    <button
-                        type="button"
-                        class="btn btn--danger btn--small"
-                        aria-expanded="false"
-                        on:click=move |_| confirming.set(true)
-                    >
-                        "Void transfer"
-                    </button>
-                }
-            }
-        >
-            <ActionForm action=action>
-                <input type="hidden" name="id" value=move || transfer_id.get() />
-                <FormError message=error />
-                <div class="form-actions">
-                    <Button variant="danger" small=true pending=action.pending()>
-                        "Confirm void"
-                    </Button>
-                    <button
-                        type="button"
-                        class="btn btn--secondary btn--small"
-                        on:click=move |_| confirming.set(false)
-                    >
-                        "Cancel"
-                    </button>
-                </div>
-            </ActionForm>
-        </Show>
     }
 }

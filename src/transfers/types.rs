@@ -1,26 +1,26 @@
-//! DTOs for the transfer server function. Compiled for both targets, so no
-//! server-only types. Ids and amounts cross the wire as strings, like the rest
-//! of the app.
+//! DTOs for the transfer server functions. Compiled for both targets, so no
+//! server-only types. Ids cross the wire as strings, like the rest of the app.
 
 use serde::{Deserialize, Serialize};
 
-/// One side of a transfer: which account, in which currency, and how much
-/// (a positive magnitude). `asset_id` must be an active fiat currency but may
-/// differ from the account's default, exactly like any transaction.
+/// One transaction the edit form's "Paired transaction" picker can offer: a
+/// candidate to link this transaction to, or the one it is already linked to.
+/// `label` is a ready-to-display summary built on the server (date, account,
+/// signed amount, currency).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct TransferLeg {
-    pub account_id: String,
-    pub asset_id: String,
-    pub amount: String,
+pub struct LinkCandidate {
+    pub transaction_id: String,
+    pub label: String,
 }
 
-/// One of the user's transfers, assembled from its two legs, for the edit form.
-/// The `amount` on each leg is a positive magnitude.
+/// The choices for the edit form's "Paired transaction" field for one
+/// transaction.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct TransferDetailDto {
-    pub id: String,
-    pub source: TransferLeg,
-    pub destination: TransferLeg,
-    pub booking_date: String,
-    pub value_date: Option<String>,
+pub struct TransferLinkOptions {
+    /// The transaction currently linked to this one, if it is already part of a
+    /// transfer. Shown selected, and not repeated in `candidates`.
+    pub current_pair: Option<LinkCandidate>,
+    /// The transactions this one could be paired with: a different account, the
+    /// opposite amount sign, not already part of a transfer.
+    pub candidates: Vec<LinkCandidate>,
 }

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        DELETE FROM transfers\n        WHERE user_id = $1\n          AND (source_transaction_id = $2 OR destination_transaction_id = $2)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "72f72b7e8a346f36fc085a43a80dba2243057eeeb739d24d4ea6e17c19c989bd"
+}

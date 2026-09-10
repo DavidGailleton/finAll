@@ -1,0 +1,79 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            t.id,\n            t.booking_date,\n            acc.account_name AS \"account_name!\",\n            t.amount,\n            a.code AS \"currency_code!\"\n        FROM transactions AS t\n        INNER JOIN accounts AS acc ON acc.user_id = t.user_id AND acc.id = t.account_id\n        INNER JOIN assets AS a ON a.id = t.asset_id\n        WHERE t.user_id = $1\n          AND t.deleted_at IS NULL\n          AND acc.deleted_at IS NULL\n          AND t.id <> $2\n          AND t.account_id <> $3\n          AND (t.amount > 0) = $4\n          AND NOT EXISTS (\n              SELECT 1\n              FROM transfers AS tr\n              WHERE tr.user_id = t.user_id\n                AND (tr.source_transaction_id = t.id OR tr.destination_transaction_id = t.id)\n                AND tr.deleted_at IS NULL\n          )\n        ORDER BY t.booking_date DESC, t.id DESC\n        LIMIT 100\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "transactions",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "booking_date",
+        "type_info": "Date",
+        "origin": {
+          "Table": {
+            "table": "transactions",
+            "name": "booking_date"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "account_name!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "accounts",
+            "name": "account_name"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "amount",
+        "type_info": "Numeric",
+        "origin": {
+          "Table": {
+            "table": "transactions",
+            "name": "amount"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "currency_code!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "assets",
+            "name": "code"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Bool"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "37ba0269ea6a53bc7281648f6d604465e68151053c2c339d85dd47b613147b49"
+}

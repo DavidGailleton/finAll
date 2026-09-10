@@ -1,5 +1,6 @@
-//! Transfers: the server-function surface for moving money between the user's
-//! own accounts. The atomic write itself lives in `crate::server::transfers`.
+//! Transfers: the server-function surface for linking two of the user's
+//! existing transactions as a movement of money between accounts. The database
+//! work itself lives in `crate::server::transfers`.
 
 pub mod types;
 

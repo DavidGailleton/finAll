@@ -1,7 +1,7 @@
 //! `/transactions` — every account's transactions, filterable by account and
 //! booking-date range, paginated with "Load more".
 //!
-//! Add, edit, delete, and transfer-void all happen here through the shared
+//! Add, edit, delete, and transfer linking all happen here through the shared
 //! [`crate::pages::ledger`] table and forms, the same ones `/accounts/:id` uses.
 
 use leptos::prelude::*;
@@ -10,9 +10,7 @@ use leptos_meta::Title;
 use crate::accounts::api::list_accounts;
 use crate::components::{Layout, PageHeader, Panel};
 use crate::pages::guard::RequireAuth;
-use crate::pages::ledger::{
-    AddTransactionForm, AddTransferForm, LedgerActions, LedgerFilter, LedgerTable,
-};
+use crate::pages::ledger::{AddTransactionForm, LedgerActions, LedgerFilter, LedgerTable};
 
 /// `/transactions`
 #[component]
@@ -52,7 +50,6 @@ fn TransactionsView() -> impl IntoView {
             <Panel title="Record" span=12>
                 <div class="ledger-actions">
                     <AddTransactionForm action=actions.create_transaction />
-                    <AddTransferForm action=actions.create_transfer />
                 </div>
             </Panel>
 

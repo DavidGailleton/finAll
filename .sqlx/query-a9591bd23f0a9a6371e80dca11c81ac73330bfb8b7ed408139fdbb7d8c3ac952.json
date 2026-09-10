@@ -1,0 +1,60 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            t.id,\n            t.account_id,\n            t.amount,\n            EXISTS (\n                SELECT 1\n                FROM transfers AS tr\n                WHERE tr.user_id = t.user_id\n                  AND (tr.source_transaction_id = t.id OR tr.destination_transaction_id = t.id)\n                  AND tr.deleted_at IS NULL\n            ) AS \"already_linked!\"\n        FROM transactions AS t\n        WHERE t.user_id = $1 AND t.id = ANY($2) AND t.deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "transactions",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "account_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "transactions",
+            "name": "account_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "amount",
+        "type_info": "Numeric",
+        "origin": {
+          "Table": {
+            "table": "transactions",
+            "name": "amount"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "already_linked!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "UuidArray"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "a9591bd23f0a9a6371e80dca11c81ac73330bfb8b7ed408139fdbb7d8c3ac952"
+}
