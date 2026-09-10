@@ -1,4 +1,4 @@
-//! `/accounts` (list) and `/accounts/:id` (detail, with edit and delete).
+//! `/accounts` (list) and `/accounts/:id` (detail, with delete).
 //!
 //! Both pages follow the `Resource` + `<Suspense>` pattern from
 //! [`crate::pages::guard`], and render explicit loading, empty, and error
@@ -10,9 +10,7 @@ use leptos_meta::Title;
 use leptos_router::components::A;
 use leptos_router::hooks::{use_navigate, use_params_map};
 
-use crate::accounts::api::{
-    get_account, list_accounts, CreateAccount, DeleteAccount, UpdateAccount,
-};
+use crate::accounts::api::{get_account, list_accounts, CreateAccount, DeleteAccount};
 use crate::accounts::types::{AccountDto, AccountType};
 use crate::assets::currency::api::list_currencies;
 use crate::balances::api::account_balance;
@@ -336,7 +334,6 @@ pub fn AccountDetailPage() -> impl IntoView {
 #[component]
 fn AccountDetail() -> impl IntoView {
     let params = use_params_map();
-    let edit = ServerAction::<UpdateAccount>::new();
     let delete = ServerAction::<DeleteAccount>::new();
     let navigate = use_navigate();
 
@@ -351,20 +348,13 @@ fn AccountDetail() -> impl IntoView {
         }
     });
 
-    // Refetch after a successful edit by depending on the action's version.
     let account = Resource::new(
-        move || {
-            (
-                params.read().get("id").unwrap_or_default(),
-                edit.version().get(),
-            )
-        },
-        |(id, _)| async move { get_account(id).await },
+        move || params.read().get("id").unwrap_or_default(),
+        |id| async move { get_account(id).await },
     );
 
     // The account's total, valued in its own default currency. Refetched
-    // whenever a ledger write lands (the account edit form never changes the
-    // balance — the default currency is immutable — so it is not a key here).
+    // whenever a ledger write lands.
     let balance = Resource::new(
         move || {
             (
@@ -379,10 +369,6 @@ fn AccountDetail() -> impl IntoView {
         |(id, ..)| async move { account_balance(id).await },
     );
 
-    let edit_error = Signal::derive(move || match edit.value().get() {
-        Some(Err(err)) => Some(server_error_message(&err)),
-        _ => None,
-    });
     let delete_error = Signal::derive(move || match delete.value().get() {
         Some(Err(err)) => Some(server_error_message(&err)),
         _ => None,
@@ -443,44 +429,6 @@ fn AccountDetail() -> impl IntoView {
                                     </Panel>
 
                                     <Panel title="Settings" span=7>
-                                        <ActionForm action=edit>
-                                            <input
-                                                type="hidden"
-                                                name="id"
-                                                value=account.id.clone()
-                                            />
-                                            <input
-                                                type="hidden"
-                                                name="default_asset_id"
-                                                value=account.default_asset_id.clone()
-                                            />
-                                            <TextField
-                                                label="Name"
-                                                name="account_name"
-                                                value=account.account_name.clone()
-                                            />
-                                            <SelectField label="Type" name="account_type">
-                                                {AccountType::ALL
-                                                    .iter()
-                                                    .map(|account_type| {
-                                                        let account_type = *account_type;
-                                                        view! {
-                                                            <option
-                                                                value=account_type.as_db_str()
-                                                                selected=account_type == current_type
-                                                            >
-                                                                {account_type.label()}
-                                                            </option>
-                                                        }
-                                                    })
-                                                    .collect_view()}
-                                            </SelectField>
-                                            <FormError message=edit_error />
-                                            <Button pending=edit.pending()>"Save changes"</Button>
-                                        </ActionForm>
-
-                                        <hr />
-
                                         <DeleteAccountForm
                                             account_id=account_id
                                             action=delete
