@@ -12,6 +12,7 @@ use leptos::prelude::*;
 use leptos_router::components::A;
 
 use crate::accounts::api::list_accounts;
+use crate::accounts::types::AccountType;
 use crate::assets::currency::api::list_currencies;
 use crate::categories::api::list_categories;
 use crate::categories::types::CategoryDto;
@@ -32,6 +33,8 @@ use crate::transfers::api::{paired_transaction_options, LinkTransfer, UnlinkTran
 pub struct AccountContext {
     pub id: String,
     pub default_asset_id: String,
+    /// A `Cash` account shows a single "Date" field (booking = value date).
+    pub account_type: AccountType,
 }
 
 /// The server actions the ledger drives. `ServerAction` is `Copy`, so this
@@ -284,6 +287,21 @@ fn TransactionRow(
     let asset_code = transaction.asset_code.clone();
     let transaction_id = transaction.id.clone();
 
+    // A foreign-currency transaction also shows its value in the account's
+    // currency, translated at its booking-date rate.
+    let is_foreign = transaction.asset_id != transaction.account_default_asset_id;
+    let converted_cell = is_foreign.then(|| {
+        let code = transaction.account_currency_code.clone();
+        match transaction.account_amount.clone() {
+            Some(converted) => view! {
+                <span class="muted" aria-hidden="true">" \u{2192} "</span>
+                <Money amount=converted code=code />
+            }
+            .into_any(),
+            None => view! { <span class="muted">" (conversion pending)"</span> }.into_any(),
+        }
+    });
+
     let (label_cell, detail_cell) = if is_transfer {
         let counterparty = transaction
             .transfer_counterparty
@@ -334,6 +352,7 @@ fn TransactionRow(
             <td>{detail_cell}</td>
             <td class="num">
                 <Money amount=amount code=asset_code />
+                {converted_cell}
             </td>
             <td>
                 <div class="row-actions">
@@ -404,22 +423,28 @@ fn EditTransactionForm(transaction: TransactionDto, actions: LedgerActions) -> i
                         Ok((currency_list, category_list, merchant_list)) => {
                             let selected = transaction.asset_id.clone();
                             let value_date = transaction.value_date.clone().unwrap_or_default();
+                            let is_cash = transaction.account_type == AccountType::Cash;
                             view! {
                                 <ActionForm action=action>
                                     <input type="hidden" name="id" value=transaction.id.clone() />
                                     <TextField
-                                        label="Booking date"
+                                        label=if is_cash { "Date" } else { "Booking date" }
                                         name="booking_date"
                                         input_type="date"
                                         value=transaction.booking_date.clone()
                                     />
-                                    <TextField
-                                        label="Value date"
-                                        name="value_date"
-                                        input_type="date"
-                                        required=false
-                                        value=value_date
-                                    />
+                                    {(!is_cash)
+                                        .then(|| {
+                                            view! {
+                                                <TextField
+                                                    label="Value date"
+                                                    name="value_date"
+                                                    input_type="date"
+                                                    required=false
+                                                    value=value_date.clone()
+                                                />
+                                            }
+                                        })}
                                     <TextField
                                         label="Amount"
                                         name="amount"
@@ -728,6 +753,13 @@ pub fn AddTransactionForm(
         .as_ref()
         .map(|account| account.default_asset_id.clone())
         .unwrap_or_default();
+    // A cash account has a single "Date" field. Reactive: on `/transactions` it
+    // follows the account picker.
+    let is_cash = RwSignal::new(
+        fixed_account
+            .as_ref()
+            .is_some_and(|account| account.account_type == AccountType::Cash),
+    );
 
     // Only fetch the pick lists once the form is opened.
     let form_data = Resource::new(
@@ -809,6 +841,8 @@ pub fn AddTransactionForm(
                                                                     .find(|account| account.id == picked)
                                                                 {
                                                                     currency_id.set(account.default_asset_id.clone());
+                                                                    is_cash
+                                                                        .set(account.account_type == AccountType::Cash);
                                                                 }
                                                                 account_id.set(picked);
                                                             }
@@ -828,17 +862,30 @@ pub fn AddTransactionForm(
                                                 }
                                                     .into_any()
                                             }}
-                                            <TextField
-                                                label="Booking date"
-                                                name="booking_date"
-                                                input_type="date"
-                                            />
-                                            <TextField
-                                                label="Value date"
-                                                name="value_date"
-                                                input_type="date"
-                                                required=false
-                                            />
+                                            <Show
+                                                when=move || is_cash.get()
+                                                fallback=|| {
+                                                    view! {
+                                                        <TextField
+                                                            label="Booking date"
+                                                            name="booking_date"
+                                                            input_type="date"
+                                                        />
+                                                        <TextField
+                                                            label="Value date"
+                                                            name="value_date"
+                                                            input_type="date"
+                                                            required=false
+                                                        />
+                                                    }
+                                                }
+                                            >
+                                                <TextField
+                                                    label="Date"
+                                                    name="booking_date"
+                                                    input_type="date"
+                                                />
+                                            </Show>
                                             <TextField
                                                 label="Amount"
                                                 name="amount"

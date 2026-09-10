@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT balance AS \"balance!\"\n        FROM account_balances\n        WHERE user_id = $1 AND account_id = $2\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "balance!",
+        "type_info": "Numeric",
+        "origin": {
+          "Table": {
+            "table": "account_balances",
+            "name": "balance"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "415145ee786fcac299cd1e4ebdc136ca44e8d75f2da61940f9342a35bf87243e"
+}

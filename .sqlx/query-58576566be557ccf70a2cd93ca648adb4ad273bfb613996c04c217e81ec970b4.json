@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT EXISTS(\n            SELECT 1\n            FROM transactions\n            WHERE user_id = $1\n              AND account_id = $2\n              AND deleted_at IS NULL\n              AND account_amount IS NULL\n        ) AS \"pending!\"\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "pending!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "58576566be557ccf70a2cd93ca648adb4ad273bfb613996c04c217e81ec970b4"
+}

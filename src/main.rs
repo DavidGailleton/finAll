@@ -82,6 +82,29 @@ async fn main() {
         }
     });
 
+    // Fill in the account-currency amount of any transaction still pending
+    // conversion (recorded while Frankfurter was unreachable, or predating the
+    // feature). Runs at startup and then daily — past-date rates are stable.
+    tokio::spawn({
+        let pool = pool.clone();
+        let fx_cache = fx_cache.clone();
+        async move {
+            use fin_all::server::transactions;
+
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
+            loop {
+                interval.tick().await;
+                match transactions::backfill_account_amounts(&pool, &fx_cache).await {
+                    Ok(filled) if filled > 0 => {
+                        log!("transactions: filled {filled} pending conversion(s)")
+                    }
+                    Ok(_) => {}
+                    Err(_) => log!("transactions: conversion backfill failed"),
+                }
+            }
+        }
+    });
+
     let app = Router::new()
         .route(
             "/health",

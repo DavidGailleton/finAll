@@ -1,18 +1,19 @@
 //! Income vs expense over an explicit period, grouped by category.
 //!
 //! For an inclusive `[from, to]` booking-date window, the signed sum of every
-//! non-transfer transaction is aggregated per `(category, currency)` and valued
-//! into a chosen display currency **at the exchange rate in force on `to`**
-//! (via [`crate::server::assets::rates::resolve_rate_as_of`]). The per-currency
-//! parts of one category are rolled into a single net, and each group is placed
-//! on the income or expense side by the **sign of that net** — the category's
-//! own `kind` is only a label. Netting is uniform: an income category that also
-//! carries a negative transaction shows the signed result, and if that result
-//! is negative the group lands under expenses.
+//! non-transfer transaction is taken per `(category, account currency, booking
+//! date)` — each day converted into the chosen display currency **at the rate on
+//! that day** (via [`crate::server::assets::rates::resolve_rate_as_of`]) and the
+//! days summed. Amounts start from each transaction's account-currency value, so
+//! the transaction-currency → account-currency step is already the booking-date
+//! rate recorded on the row. The per-currency parts of one category are rolled
+//! into a single net, and each group is placed on the income or expense side by
+//! the **sign of that net** — the category's own `kind` is only a label.
 //!
-//! A `(category, currency)` subtotal with no as-of rate is kept visible without
-//! a converted value; the report is then marked incomplete and that part is
-//! left out of the totals — nothing is silently combined or dropped.
+//! A part with a missing rate, or a transaction still pending conversion, is
+//! kept visible without a converted value; the report is then marked incomplete
+//! and that part is left out of the totals — nothing is silently combined or
+//! dropped.
 //!
 //! Every query is scoped by `user_id`.
 
@@ -88,16 +89,25 @@ pub struct DisplayCurrency {
     pub minor_units: i16,
 }
 
-/// One row of the aggregation: a category's signed net in one currency, exact
-/// and unconverted. `kind == None` iff `category_id == None` (uncategorised).
+/// One row of the aggregation: a category's signed net in one account currency,
+/// with that net valued into the display currency (each transaction's own
+/// booking day converted, then summed). `kind == None` iff `category_id == None`
+/// (uncategorised).
 pub struct CategorySubtotal {
     pub category_id: Option<Uuid>,
     pub category_name: Option<String>,
     pub category_deleted: bool,
     pub kind: Option<CategoryKind>,
-    pub asset_id: Uuid,
+    /// The account currency these amounts are recorded in.
     pub currency_code: String,
-    pub subtotal: BigDecimal,
+    /// Signed sum of the transactions' account-currency amounts, unconverted.
+    pub amount: BigDecimal,
+    /// `amount` valued into the display currency, or `None` when a booking-date
+    /// rate was missing or a transaction's conversion is still pending.
+    pub converted: Option<BigDecimal>,
+    /// The rate used for the most recent booking day; `None` when unconverted or
+    /// already in the display currency.
+    pub rate: Option<BigDecimal>,
 }
 
 /// One currency's contribution to a group, valued into the display currency.
@@ -211,23 +221,15 @@ fn side_of(converted_net: Option<&BigDecimal>, currencies: &[CurrencyPart]) -> S
     }
 }
 
-/// Fold the per-`(category, currency)` `subtotals` into per-group lines, value
-/// each currency part into `display` with the rate already resolved in
-/// `resolved`, roll the parts into a group net, and place each group by the
-/// sign of that net.
+/// Fold the per-`(category, account currency)` `subtotals` into per-group lines,
+/// roll the (already valued) currency parts into a group net, and place each
+/// group by the sign of that net.
 ///
-/// A part already in the display currency contributes its exact value,
-/// unrounded. Any other part is converted with the rate for its `asset_id`,
-/// rounded to `display.minor_units` with [`INCOME_EXPENSE_ROUNDING`]. A part
-/// with no entry in `resolved` is left unvalued (`converted_amount = None`),
-/// flips the group's and the report's `complete` to `false`, and contributes
-/// nothing to any net or total. Groups keep the order in which `subtotals`
-/// first mentions them.
-pub fn summarise(
-    subtotals: &[CategorySubtotal],
-    display: &DisplayCurrency,
-    resolved: &HashMap<Uuid, ResolvedRate>,
-) -> Result<Summary, IncomeExpenseError> {
+/// A part with `converted == None` (a missing booking-date rate or a pending
+/// conversion) is left unvalued, flips the group's and the report's `complete`
+/// to `false`, and contributes nothing to any net or total. Groups keep the
+/// order in which `subtotals` first mentions them.
+pub fn summarise(subtotals: &[CategorySubtotal]) -> Result<Summary, IncomeExpenseError> {
     struct Accum {
         category_id: Option<Uuid>,
         category_name: Option<String>,
@@ -241,32 +243,15 @@ pub fn summarise(
     let mut complete = true;
 
     for subtotal in subtotals {
-        let (converted_amount, rate) = if subtotal.asset_id == display.asset_id {
-            (Some(subtotal.subtotal.clone()), None)
-        } else if let Some(resolved_rate) = resolved.get(&subtotal.asset_id) {
-            let conversion = conversion::convert(
-                &subtotal.subtotal,
-                resolved_rate.rate.clone(),
-                subtotal.asset_id,
-                display.asset_id,
-                resolved_rate.valuation_timestamp,
-                display.minor_units,
-                INCOME_EXPENSE_ROUNDING,
-            )?;
-            (
-                Some(conversion.converted_amount),
-                Some(resolved_rate.rate.clone()),
-            )
-        } else {
+        if subtotal.converted.is_none() {
             complete = false;
-            (None, None)
-        };
+        }
 
         let part = CurrencyPart {
             currency_code: subtotal.currency_code.clone(),
-            amount: subtotal.subtotal.clone(),
-            converted_amount,
-            rate,
+            amount: subtotal.amount.clone(),
+            converted_amount: subtotal.converted.clone(),
+            rate: subtotal.rate.clone(),
         };
 
         let idx = *index.entry(subtotal.category_id).or_insert_with(|| {
@@ -348,7 +333,9 @@ pub fn summarise(
 }
 
 /// The signed-in user's income vs expense over `[from, to]`, in
-/// `display_currency_code`, valued at the rate in force on `to`.
+/// `display_currency_code`. Each transaction is valued at the rate on its own
+/// booking date (its account-currency amount, translated to the display
+/// currency).
 pub async fn report(
     pool: &PgPool,
     cache: &FxRateCache,
@@ -360,34 +347,10 @@ pub async fn report(
     let code = currency::validate_alphabetic_code(display_currency_code)?;
     let (from, to) = parse_period(from, to)?;
     let display = display_currency(pool, &code).await?;
-    let subtotals = subtotals(pool, user_id, from, to).await?;
+    let dated = dated_subtotals(pool, user_id, from, to).await?;
 
-    // Every conversion is anchored to the period-end date: the rate in force on
-    // `to` (Frankfurter carries a non-trading day forward to the last one).
-    let mut resolved: HashMap<Uuid, ResolvedRate> = HashMap::new();
-    for subtotal in &subtotals {
-        if subtotal.asset_id == display.asset_id || resolved.contains_key(&subtotal.asset_id) {
-            continue;
-        }
-        match rates::resolve_rate_as_of(
-            cache,
-            &subtotal.currency_code,
-            &display.alphabetic_code,
-            to,
-        )
-        .await
-        {
-            Ok(rate) => {
-                resolved.insert(subtotal.asset_id, rate);
-            }
-            // Left out on purpose: `summarise` renders an unvalued part for this
-            // currency and marks the report incomplete.
-            Err(RateResolutionError::Unavailable) => {}
-            Err(RateResolutionError::Internal) => return Err(IncomeExpenseError::Internal),
-        }
-    }
-
-    let summary = summarise(&subtotals, &display, &resolved)?;
+    let subtotals = value_subtotals(cache, &display, &dated).await?;
+    let summary = summarise(&subtotals)?;
 
     Ok(Report {
         from,
@@ -440,20 +403,36 @@ async fn display_currency(
     })
 }
 
+/// One `(category, account currency, booking date)` group: the signed sum of
+/// that day's account-currency amounts, before conversion.
+struct DatedSubtotal {
+    category_id: Option<Uuid>,
+    category_name: Option<String>,
+    category_deleted: bool,
+    kind: Option<CategoryKind>,
+    account_asset_id: Uuid,
+    account_currency_code: String,
+    booking_date: NaiveDate,
+    /// `None` when every transaction in the group is still pending conversion.
+    subtotal: Option<BigDecimal>,
+    /// Any transaction in the group is still pending its booking-date conversion.
+    pending: bool,
+}
+
 /// The user's in-period, non-transfer transactions summed per
-/// `(category, currency)`. A `NULL` `category_id` is the uncategorised bucket.
+/// `(category, account currency, booking date)`. A `NULL` `category_id` is the
+/// uncategorised bucket.
 ///
-/// Transfer legs are excluded with a `NOT EXISTS` anti-join (this report needs
-/// none of the transfer columns the ledger's `LEFT JOIN` fetches). `categories`
-/// is joined without a `deleted_at` filter so a soft-deleted category's
-/// immutable `kind` still classifies its history; the name is blanked here to
-/// match the ledger.
-async fn subtotals(
+/// Transfer legs are excluded with a `NOT EXISTS` anti-join. `categories` is
+/// joined without a `deleted_at` filter so a soft-deleted category's immutable
+/// `kind` still classifies its history; the name is blanked here to match the
+/// ledger.
+async fn dated_subtotals(
     pool: &PgPool,
     user_id: Uuid,
     from: NaiveDate,
     to: NaiveDate,
-) -> Result<Vec<CategorySubtotal>, IncomeExpenseError> {
+) -> Result<Vec<DatedSubtotal>, IncomeExpenseError> {
     let rows = sqlx::query!(
         r#"
         SELECT
@@ -461,12 +440,14 @@ async fn subtotals(
             c.category_name AS "category_name?",
             c.kind AS "kind?",
             (c.id IS NOT NULL AND c.deleted_at IS NOT NULL) AS "category_deleted!",
-            t.asset_id,
-            a.code AS "currency_code!",
-            sum(t.amount) AS "subtotal!"
+            acc.default_asset_id AS "account_asset_id!",
+            acc_ccy.code AS "account_currency_code!",
+            t.booking_date,
+            sum(t.account_amount) AS "subtotal?",
+            bool_or(t.account_amount IS NULL) AS "pending!"
         FROM transactions AS t
         INNER JOIN accounts AS acc ON acc.user_id = t.user_id AND acc.id = t.account_id
-        INNER JOIN assets AS a ON a.id = t.asset_id
+        INNER JOIN assets AS acc_ccy ON acc_ccy.id = acc.default_asset_id
         LEFT JOIN categories AS c ON c.user_id = t.user_id AND c.id = t.category_id
         WHERE
             t.user_id = $1
@@ -486,8 +467,9 @@ async fn subtotals(
                     AND tr.deleted_at IS NULL
             )
         GROUP BY
-            t.category_id, c.id, c.category_name, c.kind, c.deleted_at, t.asset_id, a.code
-        ORDER BY c.category_name NULLS LAST, a.code
+            t.category_id, c.id, c.category_name, c.kind, c.deleted_at,
+            acc.default_asset_id, acc_ccy.code, t.booking_date
+        ORDER BY c.category_name NULLS LAST, acc_ccy.code, t.booking_date
         "#,
         user_id,
         from,
@@ -508,7 +490,7 @@ async fn subtotals(
                 })?),
             };
 
-            Ok(CategorySubtotal {
+            Ok(DatedSubtotal {
                 category_id: row.category_id,
                 // Match the ledger: a soft-deleted category shows no name.
                 category_name: if row.category_deleted {
@@ -518,19 +500,132 @@ async fn subtotals(
                 },
                 category_deleted: row.category_deleted,
                 kind,
-                asset_id: row.asset_id,
-                currency_code: row.currency_code,
+                account_asset_id: row.account_asset_id,
+                account_currency_code: row.account_currency_code,
+                booking_date: row.booking_date,
                 subtotal: row.subtotal,
+                pending: row.pending,
             })
         })
         .collect()
 }
 
+/// Fold the per-day rows into one valued row per `(category, account currency)`:
+/// each day's amount is converted into the display currency at that day's rate
+/// and the results are summed. A day whose rate is missing, or any transaction
+/// still pending conversion, leaves the whole `(category, currency)` net
+/// unvalued (`converted = None`).
+async fn value_subtotals(
+    cache: &FxRateCache,
+    display: &DisplayCurrency,
+    dated: &[DatedSubtotal],
+) -> Result<Vec<CategorySubtotal>, IncomeExpenseError> {
+    struct Accum {
+        category_id: Option<Uuid>,
+        category_name: Option<String>,
+        category_deleted: bool,
+        kind: Option<CategoryKind>,
+        currency_code: String,
+        amount: BigDecimal,
+        converted: Option<BigDecimal>,
+        rate: Option<BigDecimal>,
+    }
+
+    let mut order: Vec<Accum> = Vec::new();
+    let mut index: HashMap<(Option<Uuid>, Uuid), usize> = HashMap::new();
+    let mut day_rates: HashMap<(Uuid, NaiveDate), Option<ResolvedRate>> = HashMap::new();
+
+    for row in dated {
+        let idx = *index
+            .entry((row.category_id, row.account_asset_id))
+            .or_insert_with(|| {
+                order.push(Accum {
+                    category_id: row.category_id,
+                    category_name: row.category_name.clone(),
+                    category_deleted: row.category_deleted,
+                    kind: row.kind,
+                    currency_code: row.account_currency_code.clone(),
+                    amount: BigDecimal::from(0),
+                    converted: Some(BigDecimal::from(0)),
+                    rate: None,
+                });
+                order.len() - 1
+            });
+
+        let day_amount = row.subtotal.clone().unwrap_or_else(|| BigDecimal::from(0));
+        order[idx].amount += &day_amount;
+
+        if row.pending {
+            order[idx].converted = None;
+            continue;
+        }
+
+        if row.account_asset_id == display.asset_id {
+            if let Some(acc) = order[idx].converted.as_mut() {
+                *acc += &day_amount;
+            }
+            continue;
+        }
+
+        let key = (row.account_asset_id, row.booking_date);
+        let resolved = match day_rates.get(&key) {
+            Some(cached) => cached.clone(),
+            None => {
+                let fresh = match rates::resolve_rate_as_of(
+                    cache,
+                    &row.account_currency_code,
+                    &display.alphabetic_code,
+                    row.booking_date,
+                )
+                .await
+                {
+                    Ok(rate) => Some(rate),
+                    Err(RateResolutionError::Unavailable) => None,
+                    Err(RateResolutionError::Internal) => return Err(IncomeExpenseError::Internal),
+                };
+                day_rates.insert(key, fresh.clone());
+                fresh
+            }
+        };
+
+        match resolved {
+            Some(rate) => {
+                let converted = conversion::convert(
+                    &day_amount,
+                    rate.rate.clone(),
+                    row.account_asset_id,
+                    display.asset_id,
+                    rate.valuation_timestamp,
+                    display.minor_units,
+                    INCOME_EXPENSE_ROUNDING,
+                )?;
+                if let Some(acc) = order[idx].converted.as_mut() {
+                    *acc += &converted.converted_amount;
+                }
+                order[idx].rate = Some(rate.rate);
+            }
+            None => order[idx].converted = None,
+        }
+    }
+
+    Ok(order
+        .into_iter()
+        .map(|acc| CategorySubtotal {
+            category_id: acc.category_id,
+            category_name: acc.category_name,
+            category_deleted: acc.category_deleted,
+            kind: acc.kind,
+            currency_code: acc.currency_code,
+            amount: acc.amount,
+            converted: acc.converted,
+            rate: acc.rate,
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
-
-    use sqlx::types::chrono::{DateTime, Utc};
 
     use super::*;
 
@@ -542,41 +637,31 @@ mod tests {
         Uuid::from_u128(n)
     }
 
-    fn at(secs: i64) -> DateTime<Utc> {
-        DateTime::from_timestamp(secs, 0).expect("valid fixed timestamp")
-    }
-
-    fn eur() -> DisplayCurrency {
-        DisplayCurrency {
-            asset_id: asset(1),
-            alphabetic_code: "EUR".to_owned(),
-            minor_units: 2,
-        }
-    }
-
-    fn rate(value: &str) -> ResolvedRate {
-        ResolvedRate {
-            rate: dec(value),
-            valuation_timestamp: at(1_700_000_000),
-        }
-    }
-
+    /// A pre-valued `(category, currency)` subtotal. `converted` is `None` for a
+    /// part with no usable rate; `rate` is only for display.
     fn sub(
         category: Option<u128>,
         kind: Option<CategoryKind>,
-        asset_n: u128,
         code: &str,
         amount: &str,
+        converted: Option<&str>,
+        rate: Option<&str>,
     ) -> CategorySubtotal {
         CategorySubtotal {
             category_id: category.map(asset),
             category_name: category.map(|n| format!("Category {n}")),
             category_deleted: false,
             kind,
-            asset_id: asset(asset_n),
             currency_code: code.to_owned(),
-            subtotal: dec(amount),
+            amount: dec(amount),
+            converted: converted.map(dec),
+            rate: rate.map(dec),
         }
+    }
+
+    /// A subtotal already in the display currency: it is its own converted value.
+    fn home(category: Option<u128>, kind: Option<CategoryKind>, amount: &str) -> CategorySubtotal {
+        sub(category, kind, "EUR", amount, Some(amount), None)
     }
 
     #[test]
@@ -615,7 +700,7 @@ mod tests {
 
     #[test]
     fn no_subtotals_is_a_zero_complete_report() {
-        let summary = summarise(&[], &eur(), &HashMap::new()).expect("summarises");
+        let summary = summarise(&[]).expect("summarises");
         assert!(summary.income_lines.is_empty());
         assert!(summary.expense_lines.is_empty());
         assert!(summary.unvalued_lines.is_empty());
@@ -626,10 +711,10 @@ mod tests {
     #[test]
     fn a_positive_net_lands_on_the_income_side() {
         let rows = [
-            sub(Some(10), Some(CategoryKind::Income), 1, "EUR", "10"),
-            sub(Some(10), Some(CategoryKind::Income), 1, "EUR", "-2"),
+            home(Some(10), Some(CategoryKind::Income), "10"),
+            home(Some(10), Some(CategoryKind::Income), "-2"),
         ];
-        let summary = summarise(&rows, &eur(), &HashMap::new()).expect("summarises");
+        let summary = summarise(&rows).expect("summarises");
 
         assert_eq!(summary.income_lines.len(), 1);
         assert_eq!(summary.income_lines[0].converted_net, Some(dec("8")));
@@ -640,8 +725,8 @@ mod tests {
 
     #[test]
     fn an_income_category_that_nets_negative_lands_on_the_expense_side() {
-        let rows = [sub(Some(7), Some(CategoryKind::Income), 1, "EUR", "-30")];
-        let summary = summarise(&rows, &eur(), &HashMap::new()).expect("summarises");
+        let rows = [home(Some(7), Some(CategoryKind::Income), "-30")];
+        let summary = summarise(&rows).expect("summarises");
 
         assert_eq!(summary.expense_lines.len(), 1);
         assert_eq!(
@@ -654,16 +739,16 @@ mod tests {
 
     #[test]
     fn an_expense_category_that_nets_positive_lands_on_the_income_side() {
-        let rows = [sub(Some(3), Some(CategoryKind::Expense), 1, "EUR", "50")];
-        let summary = summarise(&rows, &eur(), &HashMap::new()).expect("summarises");
+        let rows = [home(Some(3), Some(CategoryKind::Expense), "50")];
+        let summary = summarise(&rows).expect("summarises");
         assert_eq!(summary.income_lines.len(), 1);
         assert_eq!(summary.total_income, dec("50"));
     }
 
     #[test]
     fn an_uncategorised_group_is_placed_by_its_sign() {
-        let rows = [sub(None, None, 1, "EUR", "40")];
-        let summary = summarise(&rows, &eur(), &HashMap::new()).expect("summarises");
+        let rows = [home(None, None, "40")];
+        let summary = summarise(&rows).expect("summarises");
         assert_eq!(summary.income_lines.len(), 1);
         assert_eq!(summary.income_lines[0].category_id, None);
         assert_eq!(summary.income_lines[0].category_kind, None);
@@ -672,10 +757,10 @@ mod tests {
     #[test]
     fn a_fully_valued_zero_net_group_is_omitted() {
         let rows = [
-            sub(Some(5), Some(CategoryKind::Expense), 1, "EUR", "20"),
-            sub(Some(5), Some(CategoryKind::Expense), 1, "EUR", "-20"),
+            home(Some(5), Some(CategoryKind::Expense), "20"),
+            home(Some(5), Some(CategoryKind::Expense), "-20"),
         ];
-        let summary = summarise(&rows, &eur(), &HashMap::new()).expect("summarises");
+        let summary = summarise(&rows).expect("summarises");
         assert!(summary.income_lines.is_empty());
         assert!(summary.expense_lines.is_empty());
         assert!(summary.unvalued_lines.is_empty());
@@ -683,12 +768,18 @@ mod tests {
     }
 
     #[test]
-    fn a_foreign_part_is_converted_and_rounded_to_minor_units() {
-        let rows = [sub(Some(2), Some(CategoryKind::Income), 2, "USD", "100")];
-        let resolved = HashMap::from([(asset(2), rate("1.234"))]);
-        let summary = summarise(&rows, &eur(), &resolved).expect("summarises");
+    fn a_converted_foreign_part_uses_its_converted_value() {
+        // $100 recorded as EUR 123.40 (already converted upstream).
+        let rows = [sub(
+            Some(2),
+            Some(CategoryKind::Income),
+            "USD",
+            "100",
+            Some("123.40"),
+            Some("1.234"),
+        )];
+        let summary = summarise(&rows).expect("summarises");
 
-        // 100 * 1.234 = 123.400 -> 123.40 at 2 minor units.
         assert_eq!(summary.income_lines[0].converted_net, Some(dec("123.40")));
         assert_eq!(summary.total_income, dec("123.40"));
         assert_eq!(
@@ -700,8 +791,15 @@ mod tests {
 
     #[test]
     fn a_single_currency_group_with_no_rate_falls_back_to_its_native_sign() {
-        let rows = [sub(Some(4), Some(CategoryKind::Expense), 2, "USD", "-100")];
-        let summary = summarise(&rows, &eur(), &HashMap::new()).expect("summarises");
+        let rows = [sub(
+            Some(4),
+            Some(CategoryKind::Expense),
+            "USD",
+            "-100",
+            None,
+            None,
+        )];
+        let summary = summarise(&rows).expect("summarises");
 
         assert_eq!(summary.expense_lines.len(), 1);
         assert_eq!(summary.expense_lines[0].converted_net, None);
@@ -713,10 +811,10 @@ mod tests {
     #[test]
     fn a_multi_currency_group_can_be_partially_valued() {
         let rows = [
-            sub(Some(6), Some(CategoryKind::Income), 1, "EUR", "120"),
-            sub(Some(6), Some(CategoryKind::Income), 2, "USD", "50"),
+            home(Some(6), Some(CategoryKind::Income), "120"),
+            sub(Some(6), Some(CategoryKind::Income), "USD", "50", None, None),
         ];
-        let summary = summarise(&rows, &eur(), &HashMap::new()).expect("summarises");
+        let summary = summarise(&rows).expect("summarises");
 
         assert_eq!(summary.income_lines.len(), 1);
         assert_eq!(summary.income_lines[0].converted_net, Some(dec("120")));
@@ -729,10 +827,17 @@ mod tests {
     #[test]
     fn a_multi_currency_group_with_nothing_valued_is_unvalued() {
         let rows = [
-            sub(Some(8), Some(CategoryKind::Income), 2, "USD", "10"),
-            sub(Some(8), Some(CategoryKind::Income), 3, "GBP", "-10"),
+            sub(Some(8), Some(CategoryKind::Income), "USD", "10", None, None),
+            sub(
+                Some(8),
+                Some(CategoryKind::Income),
+                "GBP",
+                "-10",
+                None,
+                None,
+            ),
         ];
-        let summary = summarise(&rows, &eur(), &HashMap::new()).expect("summarises");
+        let summary = summarise(&rows).expect("summarises");
         assert_eq!(summary.unvalued_lines.len(), 1);
         assert!(summary.income_lines.is_empty());
         assert!(summary.expense_lines.is_empty());
@@ -741,8 +846,8 @@ mod tests {
 
     #[test]
     fn a_display_currency_part_contributes_exact_and_unrounded() {
-        let rows = [sub(Some(9), Some(CategoryKind::Income), 1, "EUR", "10.005")];
-        let summary = summarise(&rows, &eur(), &HashMap::new()).expect("summarises");
+        let rows = [home(Some(9), Some(CategoryKind::Income), "10.005")];
+        let summary = summarise(&rows).expect("summarises");
         assert_eq!(summary.total_income, dec("10.005"));
         assert_eq!(summary.net, dec("10.005"));
     }
@@ -776,6 +881,7 @@ mod db_tests {
     ) {
         transactions::create(
             pool,
+            &fx_cache(),
             user_id,
             account_id,
             &transactions::TransactionWrite {
@@ -1034,11 +1140,13 @@ mod db_tests {
     }
 
     #[sqlx::test]
-    async fn a_foreign_currency_needs_an_as_of_rate(pool: PgPool) {
+    async fn a_foreign_account_is_valued_at_each_transactions_booking_date(pool: PgPool) {
         use sqlx::types::chrono::{DateTime, Utc};
 
         let alice = create_user(&pool, "alice@example.test").await;
         let usd = currency_id(&pool, "USD").await;
+        // A USD account: the transaction's account amount is -50 USD, valued
+        // into EUR at the rate on its own booking date.
         let account = accounts::create(&pool, alice, "USD Account", "bank", usd)
             .await
             .expect("account");
@@ -1046,19 +1154,10 @@ mod db_tests {
             .await
             .expect("category");
 
-        categorised_transaction(
-            &pool,
-            alice,
-            account.id,
-            usd,
-            travel.id,
-            "-50",
-            date(2026, 6, 10),
-        )
-        .await;
+        let booking = date(2026, 6, 10);
+        categorised_transaction(&pool, alice, account.id, usd, travel.id, "-50", booking).await;
 
-        // Nothing cached or fetchable for the period -> the line is unvalued and
-        // the report is incomplete.
+        // No USD -> EUR rate cached -> the line is unvalued, report incomplete.
         let cache = FxRateCache::new().expect("cache");
         let incomplete = report(&pool, &cache, alice, "EUR", "2026-06-01", "2026-06-30")
             .await
@@ -1068,13 +1167,10 @@ mod db_tests {
         assert_eq!(incomplete.expense_lines[0].converted_net, None);
         assert_eq!(incomplete.total_expense, dec("0"));
 
-        // Seed the direct USD -> EUR rate for the period-end date.
-        let period_end = date(2026, 6, 30);
-        let as_of = DateTime::<Utc>::from_naive_utc_and_offset(
-            date(2026, 6, 1).and_hms_opt(0, 0, 0).unwrap(),
-            Utc,
-        );
-        cache.seed("USD", period_end, as_of, &[("EUR", "0.8")]);
+        // Seed the USD -> EUR rate for the transaction's booking date.
+        let as_of =
+            DateTime::<Utc>::from_naive_utc_and_offset(booking.and_hms_opt(0, 0, 0).unwrap(), Utc);
+        cache.seed("USD", booking, as_of, &[("EUR", "0.8")]);
 
         let complete = report(&pool, &cache, alice, "EUR", "2026-06-01", "2026-06-30")
             .await

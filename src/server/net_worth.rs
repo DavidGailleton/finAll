@@ -232,14 +232,36 @@ pub async fn report(
     }
 
     let valuation = value_positions(&positions, &display, &resolved)?;
+    // A transaction still awaiting its booking-date conversion is left out of the
+    // `account_balances` view, so its account's position is understated.
+    let complete = valuation.complete && !has_pending_conversion(pool, user_id).await?;
 
     Ok(ValuedReport {
         display,
         lines: valuation.lines,
         total: valuation.total,
-        complete: valuation.complete,
+        complete,
         rates_as_of: valuation.rates_as_of,
     })
+}
+
+/// Whether the user has a non-deleted transaction whose account-currency amount
+/// has not been computed yet.
+async fn has_pending_conversion(pool: &PgPool, user_id: Uuid) -> Result<bool, NetWorthError> {
+    let pending = sqlx::query_scalar!(
+        r#"
+        SELECT EXISTS(
+            SELECT 1
+            FROM transactions
+            WHERE user_id = $1 AND deleted_at IS NULL AND account_amount IS NULL
+        ) AS "pending!"
+        "#,
+        user_id,
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(pending)
 }
 
 /// The `assets` / `fiat_assets` detail for one active currency, by code.

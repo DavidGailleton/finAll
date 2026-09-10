@@ -39,6 +39,7 @@ pub async fn list_transactions(
 ) -> Result<TransactionPage, ServerFnError> {
     use sqlx::types::Uuid;
 
+    use crate::accounts::types::AccountType;
     use crate::server::auth::extract;
     use crate::server::transactions::{self, TransactionError, TransactionFilter};
     use crate::transactions::types::TransactionDto;
@@ -82,7 +83,13 @@ pub async fn list_transactions(
                 id: record.id.to_string(),
                 account_id: record.account_id.to_string(),
                 account_name: record.account_name,
+                account_type: AccountType::from_db_str(&record.account_type)
+                    .unwrap_or(AccountType::Other),
+                account_default_asset_id: record.account_default_asset_id.to_string(),
+                account_currency_code: record.account_currency_code,
                 amount: record.amount.to_string(),
+                account_amount: record.account_amount.map(|amount| amount.to_string()),
+                fx_rate: record.fx_rate.map(|rate| rate.to_string()),
                 asset_id: record.asset_id.to_string(),
                 asset_code: record.asset_code,
                 booking_date: record.booking_date.to_string(),
@@ -111,12 +118,16 @@ pub async fn create_transaction(
     category_id: String,
     merchant_id: String,
 ) -> Result<(), ServerFnError> {
+    use std::sync::Arc;
+
     use sqlx::types::Uuid;
 
+    use crate::server::assets::fx_cache::FxRateCache;
     use crate::server::auth::extract;
     use crate::server::transactions::{self, TransactionError, TransactionWrite};
 
     let pool = expect_context::<sqlx::PgPool>();
+    let cache = expect_context::<Arc<FxRateCache>>();
 
     let user = extract::current_user(&pool)
         .await?
@@ -134,7 +145,7 @@ pub async fn create_transaction(
         merchant_id: parse_optional_id(&merchant_id, "invalid merchant id")?,
     };
 
-    transactions::create(&pool, user.user_id, account_id, &write).await?;
+    transactions::create(&pool, &cache, user.user_id, account_id, &write).await?;
 
     Ok(())
 }
@@ -151,12 +162,16 @@ pub async fn update_transaction(
     category_id: String,
     merchant_id: String,
 ) -> Result<(), ServerFnError> {
+    use std::sync::Arc;
+
     use sqlx::types::Uuid;
 
+    use crate::server::assets::fx_cache::FxRateCache;
     use crate::server::auth::extract;
     use crate::server::transactions::{self, TransactionError, TransactionWrite};
 
     let pool = expect_context::<sqlx::PgPool>();
+    let cache = expect_context::<Arc<FxRateCache>>();
 
     let user = extract::current_user(&pool)
         .await?
@@ -174,7 +189,7 @@ pub async fn update_transaction(
         merchant_id: parse_optional_id(&merchant_id, "invalid merchant id")?,
     };
 
-    transactions::update(&pool, user.user_id, id, &write).await?;
+    transactions::update(&pool, &cache, user.user_id, id, &write).await?;
 
     Ok(())
 }

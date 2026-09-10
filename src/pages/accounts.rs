@@ -440,6 +440,7 @@ fn AccountDetail() -> impl IntoView {
                                         <TransactionsList
                                             account_id=transactions_account_id
                                             default_asset_id=transactions_default_asset_id
+                                            account_type=current_type
                                             actions=ledger_actions
                                         />
                                     </Panel>
@@ -505,11 +506,13 @@ fn DeleteAccountForm(
 fn TransactionsList(
     account_id: String,
     default_asset_id: String,
+    account_type: AccountType,
     actions: LedgerActions,
 ) -> impl IntoView {
     let account_context = AccountContext {
         id: account_id.clone(),
         default_asset_id,
+        account_type,
     };
     let filter_account_id = account_id;
     let filter = LedgerFilter {

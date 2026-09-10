@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        INSERT INTO transactions\n            (user_id, account_id, asset_id, amount, booking_date, value_date, category_id, merchant_id)\n        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)\n        RETURNING id\n        ",
+  "query": "\n        INSERT INTO transactions\n            (user_id, account_id, asset_id, amount, booking_date, value_date,\n             category_id, merchant_id, account_amount, fx_rate, fx_rate_date)\n        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)\n        RETURNING id\n        ",
   "describe": {
     "columns": [
       {
@@ -24,12 +24,15 @@
         "Date",
         "Date",
         "Uuid",
-        "Uuid"
+        "Uuid",
+        "Numeric",
+        "Numeric",
+        "Date"
       ]
     },
     "nullable": [
       false
     ]
   },
-  "hash": "ed80c742855e945852587fd0252521610a8fd7f6b577586482aceee90bf91073"
+  "hash": "5d2eaf6f33910ad0097559587df1df45a578bee058471819673209053d513c81"
 }

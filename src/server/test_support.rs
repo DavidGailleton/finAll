@@ -50,8 +50,9 @@ pub async fn currency_id(pool: &PgPool, code: &str) -> Uuid {
         .expect("seeded currency")
 }
 
-/// Insert a transaction on an account. `amount` is an exact decimal literal;
-/// it never passes through a float.
+/// Insert a transaction in the account's own currency: `account_amount` is set
+/// equal to `amount` (no FX). `amount` is an exact decimal literal; it never
+/// passes through a float.
 pub async fn insert_transaction(
     pool: &PgPool,
     user_id: Uuid,
@@ -62,8 +63,9 @@ pub async fn insert_transaction(
 ) -> Uuid {
     sqlx::query_scalar(
         r#"
-        INSERT INTO transactions (user_id, account_id, asset_id, amount, booking_date)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO transactions
+            (user_id, account_id, asset_id, amount, account_amount, booking_date)
+        VALUES ($1, $2, $3, $4, $4, $5)
         RETURNING id
         "#,
     )
@@ -75,6 +77,37 @@ pub async fn insert_transaction(
     .fetch_one(pool)
     .await
     .expect("insert test transaction")
+}
+
+/// Insert a foreign-currency transaction: `amount` is in `asset_id`'s currency,
+/// `account_amount` is its value in the account's currency (`None` leaves the
+/// conversion "pending" — a NULL `account_amount`).
+pub async fn insert_foreign_transaction(
+    pool: &PgPool,
+    user_id: Uuid,
+    account_id: Uuid,
+    asset_id: Uuid,
+    amount: &str,
+    account_amount: Option<&str>,
+    booking_date: NaiveDate,
+) -> Uuid {
+    sqlx::query_scalar(
+        r#"
+        INSERT INTO transactions
+            (user_id, account_id, asset_id, amount, account_amount, booking_date)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        RETURNING id
+        "#,
+    )
+    .bind(user_id)
+    .bind(account_id)
+    .bind(asset_id)
+    .bind(dec(amount))
+    .bind(account_amount.map(dec))
+    .bind(booking_date)
+    .fetch_one(pool)
+    .await
+    .expect("insert foreign test transaction")
 }
 
 /// Link two existing transactions as the two legs of a transfer and return the

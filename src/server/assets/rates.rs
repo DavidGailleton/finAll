@@ -33,6 +33,7 @@ pub enum RateResolutionError {
 /// A resolved exchange rate expressed the way
 /// [`convert`](crate::server::assets::conversion::convert) expects — target
 /// units per source unit — with the instant the valuation is anchored to.
+#[derive(Clone)]
 pub struct ResolvedRate {
     pub rate: BigDecimal,
     pub valuation_timestamp: DateTime<Utc>,

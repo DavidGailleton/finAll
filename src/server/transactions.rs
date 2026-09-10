@@ -5,18 +5,34 @@
 //! functions, and the domain error.
 //!
 //! Every value arriving from a server function is untrusted. `validate_amount`,
-//! `validate_booking_date`, `validate_value_date` and `validate_date_range` are
-//! the authoritative checks, mirroring the `transactions` table's constraints.
+//! `validate_booking_date`, `validate_value_date` and `validate_date_range`
+//! parse the raw fields; `resolve_dates` then applies the cross-field rules (a
+//! cash account keeps one date; a value date may not precede the booking date).
 //! Every query is scoped by `user_id` so one user can never read or change
 //! another's transactions.
+//!
+//! A foreign-currency transaction is also recorded in its account's currency
+//! (`account_amount`), translated once at the FX rate on its booking date;
+//! `backfill_account_amounts` fills in any left pending because the rate source
+//! was unreachable at write time.
 
 use std::str::FromStr;
 
-use bigdecimal::Zero;
+use bigdecimal::{RoundingMode, Zero};
 use leptos::logging;
 use sqlx::types::chrono::NaiveDate;
 use sqlx::types::{BigDecimal, Uuid};
 use sqlx::PgPool;
+
+use crate::server::assets::conversion;
+use crate::server::assets::fx_cache::FxRateCache;
+use crate::server::assets::rates;
+
+/// Rounding applied when a foreign-currency transaction is translated into its
+/// account's currency, to that currency's minor-unit precision (inside
+/// [`conversion::convert`]). The same banker's-rounding policy as the report
+/// modules.
+const TRANSACTION_FX_ROUNDING: RoundingMode = RoundingMode::HalfEven;
 
 /// The largest number of fractional digits `transactions.amount` can hold
 /// (`NUMERIC(38, 18)`).
@@ -69,6 +85,15 @@ pub struct TransactionRecord {
     pub asset_code: String,
     pub account_id: Uuid,
     pub account_name: String,
+    pub account_type: String,
+    pub account_default_asset_id: Uuid,
+    pub account_currency_code: String,
+    /// The transaction's amount in the account's currency (§ `account_amount`
+    /// column). `None` while a foreign-currency conversion is still pending.
+    pub account_amount: Option<BigDecimal>,
+    /// The rate used for that conversion; `None` when the transaction is already
+    /// in the account currency or the conversion is pending.
+    pub fx_rate: Option<BigDecimal>,
     pub booking_date: NaiveDate,
     pub value_date: Option<NaiveDate>,
     pub category_id: Option<Uuid>,
@@ -130,6 +155,11 @@ pub async fn list(
             a.code AS "asset_code!",
             t.account_id,
             acc.account_name AS "account_name!",
+            acc.account_type AS "account_type!",
+            acc.default_asset_id AS "account_default_asset_id!",
+            acc_ccy.code AS "account_currency_code!",
+            t.account_amount,
+            t.fx_rate,
             t.booking_date,
             t.value_date,
             t.category_id,
@@ -142,6 +172,7 @@ pub async fn list(
         INNER JOIN assets AS a ON a.id = t.asset_id
         INNER JOIN accounts AS acc
             ON acc.user_id = t.user_id AND acc.id = t.account_id
+        INNER JOIN assets AS acc_ccy ON acc_ccy.id = acc.default_asset_id
         LEFT JOIN categories AS c
             ON c.user_id = t.user_id AND c.id = t.category_id AND c.deleted_at IS NULL
         LEFT JOIN merchants AS m
@@ -398,6 +429,174 @@ async fn assert_write_targets_exist(
     Ok(())
 }
 
+/// What the write path needs to know about a transaction's account to record it
+/// in the account's currency.
+struct AccountFxContext {
+    default_asset_id: Uuid,
+    is_cash: bool,
+    currency_code: String,
+    minor_units: i16,
+}
+
+/// The [`AccountFxContext`] for one of the user's non-deleted accounts, or
+/// [`TransactionError::NotFound`].
+async fn account_fx_context(
+    pool: &PgPool,
+    user_id: Uuid,
+    account_id: Uuid,
+) -> Result<AccountFxContext, TransactionError> {
+    let row = sqlx::query!(
+        r#"
+        SELECT
+            acc.default_asset_id,
+            acc.account_type,
+            a.code AS "currency_code!",
+            f.minor_units AS "minor_units!"
+        FROM accounts AS acc
+        INNER JOIN assets AS a ON a.id = acc.default_asset_id
+        INNER JOIN fiat_assets AS f ON f.asset_id = acc.default_asset_id
+        WHERE acc.id = $1 AND acc.user_id = $2 AND acc.deleted_at IS NULL
+        "#,
+        account_id,
+        user_id,
+    )
+    .fetch_optional(pool)
+    .await?
+    .ok_or(TransactionError::NotFound)?;
+
+    Ok(AccountFxContext {
+        default_asset_id: row.default_asset_id,
+        is_cash: row.account_type == "cash",
+        currency_code: row.currency_code,
+        minor_units: row.minor_units,
+    })
+}
+
+/// The [`AccountFxContext`] for the account of one of the user's non-deleted
+/// transactions, or [`TransactionError::NotFound`].
+async fn account_fx_context_for_transaction(
+    pool: &PgPool,
+    user_id: Uuid,
+    transaction_id: Uuid,
+) -> Result<AccountFxContext, TransactionError> {
+    let row = sqlx::query!(
+        r#"
+        SELECT
+            acc.default_asset_id,
+            acc.account_type,
+            a.code AS "currency_code!",
+            f.minor_units AS "minor_units!"
+        FROM transactions AS t
+        INNER JOIN accounts AS acc ON acc.id = t.account_id
+        INNER JOIN assets AS a ON a.id = acc.default_asset_id
+        INNER JOIN fiat_assets AS f ON f.asset_id = acc.default_asset_id
+        WHERE t.id = $1 AND t.user_id = $2 AND t.deleted_at IS NULL
+        "#,
+        transaction_id,
+        user_id,
+    )
+    .fetch_optional(pool)
+    .await?
+    .ok_or(TransactionError::NotFound)?;
+
+    Ok(AccountFxContext {
+        default_asset_id: row.default_asset_id,
+        is_cash: row.account_type == "cash",
+        currency_code: row.currency_code,
+        minor_units: row.minor_units,
+    })
+}
+
+/// Reconcile a transaction's booking and value dates. A cash account keeps a
+/// single date, so the value date is forced equal to the booking date;
+/// otherwise a supplied value date must not precede the booking date.
+fn resolve_dates(
+    booking_date: NaiveDate,
+    value_date: Option<NaiveDate>,
+    is_cash: bool,
+) -> Result<(NaiveDate, Option<NaiveDate>), TransactionError> {
+    if is_cash {
+        return Ok((booking_date, Some(booking_date)));
+    }
+    if let Some(value_date) = value_date {
+        if value_date < booking_date {
+            return Err(TransactionError::InvalidInput(
+                "the value date cannot be before the booking date",
+            ));
+        }
+    }
+    Ok((booking_date, value_date))
+}
+
+/// The alphabetic code of a currency asset already asserted to exist.
+async fn currency_code(pool: &PgPool, asset_id: Uuid) -> Result<String, TransactionError> {
+    sqlx::query_scalar!("SELECT code FROM assets WHERE id = $1", asset_id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or(TransactionError::UnknownAsset)
+}
+
+/// The transaction currency (what `amount` is in).
+struct SourceAmount<'a> {
+    asset_id: Uuid,
+    code: &'a str,
+    amount: &'a BigDecimal,
+}
+
+/// The account currency (what the transaction is translated into).
+struct TargetCurrency<'a> {
+    asset_id: Uuid,
+    code: &'a str,
+    minor_units: i16,
+}
+
+/// The `(account_amount, fx_rate, fx_rate_date)` trio for a transaction:
+/// - `(Some(amount), None, None)` when it is already in the account's currency;
+/// - the converted amount at the `booking_date` rate otherwise;
+/// - `(None, None, None)` — "conversion pending" — when that rate cannot be
+///   fetched. The write is never blocked; the background backfill fills it later.
+async fn compute_conversion(
+    cache: &FxRateCache,
+    source: SourceAmount<'_>,
+    target: TargetCurrency<'_>,
+    booking_date: NaiveDate,
+) -> Result<(Option<BigDecimal>, Option<BigDecimal>, Option<NaiveDate>), TransactionError> {
+    if source.asset_id == target.asset_id {
+        return Ok((Some(source.amount.clone()), None, None));
+    }
+
+    match rates::resolve_rate_as_of(cache, source.code, target.code, booking_date).await {
+        Ok(rate) => {
+            let converted = conversion::convert(
+                source.amount,
+                rate.rate,
+                source.asset_id,
+                target.asset_id,
+                rate.valuation_timestamp,
+                target.minor_units,
+                TRANSACTION_FX_ROUNDING,
+            )
+            .map_err(|err| {
+                logging::error!("transactions: conversion rejected a server-built input: {err}");
+                TransactionError::Internal
+            })?;
+            Ok((
+                Some(converted.converted_amount),
+                Some(converted.rate),
+                Some(converted.valuation_timestamp.date_naive()),
+            ))
+        }
+        Err(_) => {
+            logging::log!(
+                "transactions: no {} -> {} rate for {booking_date}; conversion pending",
+                source.code,
+                target.code,
+            );
+            Ok((None, None, None))
+        }
+    }
+}
+
 /// Insert a transaction on one of the user's accounts.
 ///
 /// Returns [`TransactionError::NotFound`] if `account_id` is not one of this
@@ -407,43 +606,52 @@ async fn assert_write_targets_exist(
 /// `merchant_id` is not one of the user's active rows.
 pub async fn create(
     pool: &PgPool,
+    cache: &FxRateCache,
     user_id: Uuid,
     account_id: Uuid,
     write: &TransactionWrite,
 ) -> Result<Uuid, TransactionError> {
-    let account = sqlx::query_scalar!(
-        r#"
-        SELECT id
-        FROM accounts
-        WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
-        "#,
-        account_id,
-        user_id,
-    )
-    .fetch_optional(pool)
-    .await?;
-
-    if account.is_none() {
-        return Err(TransactionError::NotFound);
-    }
-
+    let account = account_fx_context(pool, user_id, account_id).await?;
     assert_write_targets_exist(pool, user_id, write).await?;
+
+    let (booking_date, value_date) =
+        resolve_dates(write.booking_date, write.value_date, account.is_cash)?;
+    let source_code = currency_code(pool, write.asset_id).await?;
+    let (account_amount, fx_rate, fx_rate_date) = compute_conversion(
+        cache,
+        SourceAmount {
+            asset_id: write.asset_id,
+            code: &source_code,
+            amount: &write.amount,
+        },
+        TargetCurrency {
+            asset_id: account.default_asset_id,
+            code: &account.currency_code,
+            minor_units: account.minor_units,
+        },
+        booking_date,
+    )
+    .await?;
 
     let row = match sqlx::query!(
         r#"
         INSERT INTO transactions
-            (user_id, account_id, asset_id, amount, booking_date, value_date, category_id, merchant_id)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            (user_id, account_id, asset_id, amount, booking_date, value_date,
+             category_id, merchant_id, account_amount, fx_rate, fx_rate_date)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         RETURNING id
         "#,
         user_id,
         account_id,
         write.asset_id,
         write.amount,
-        write.booking_date,
-        write.value_date,
+        booking_date,
+        value_date,
         write.category_id,
         write.merchant_id,
+        account_amount,
+        fx_rate,
+        fx_rate_date,
     )
     .fetch_one(pool)
     .await
@@ -472,11 +680,32 @@ pub async fn create(
 /// the transfer is only a link between the two rows and is left untouched.
 pub async fn update(
     pool: &PgPool,
+    cache: &FxRateCache,
     user_id: Uuid,
     id: Uuid,
     write: &TransactionWrite,
 ) -> Result<(), TransactionError> {
+    let account = account_fx_context_for_transaction(pool, user_id, id).await?;
     assert_write_targets_exist(pool, user_id, write).await?;
+
+    let (booking_date, value_date) =
+        resolve_dates(write.booking_date, write.value_date, account.is_cash)?;
+    let source_code = currency_code(pool, write.asset_id).await?;
+    let (account_amount, fx_rate, fx_rate_date) = compute_conversion(
+        cache,
+        SourceAmount {
+            asset_id: write.asset_id,
+            code: &source_code,
+            amount: &write.amount,
+        },
+        TargetCurrency {
+            asset_id: account.default_asset_id,
+            code: &account.currency_code,
+            minor_units: account.minor_units,
+        },
+        booking_date,
+    )
+    .await?;
 
     let row = match sqlx::query!(
         r#"
@@ -487,6 +716,9 @@ pub async fn update(
             value_date = $6,
             category_id = $7,
             merchant_id = $8,
+            account_amount = $9,
+            fx_rate = $10,
+            fx_rate_date = $11,
             updated_at = now()
         WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
         RETURNING id
@@ -495,10 +727,13 @@ pub async fn update(
         user_id,
         write.asset_id,
         write.amount,
-        write.booking_date,
-        write.value_date,
+        booking_date,
+        value_date,
         write.category_id,
         write.merchant_id,
+        account_amount,
+        fx_rate,
+        fx_rate_date,
     )
     .fetch_optional(pool)
     .await
@@ -560,6 +795,78 @@ pub async fn soft_delete(pool: &PgPool, user_id: Uuid, id: Uuid) -> Result<(), T
     tx.commit().await?;
 
     Ok(())
+}
+
+/// Fill `account_amount` / `fx_rate` / `fx_rate_date` for every non-deleted
+/// transaction still pending conversion (a foreign-currency row whose
+/// booking-date rate had not been fetched — a write made while the rate source
+/// was unreachable, or a row predating this feature). A row whose rate is still
+/// unavailable stays pending. Returns the number filled.
+pub async fn backfill_account_amounts(
+    pool: &PgPool,
+    cache: &FxRateCache,
+) -> Result<usize, TransactionError> {
+    let pending = sqlx::query!(
+        r#"
+        SELECT
+            t.id,
+            t.asset_id,
+            t.amount,
+            t.booking_date,
+            acc.default_asset_id AS "default_asset_id!",
+            src.code AS "source_code!",
+            dst.code AS "account_code!",
+            f.minor_units AS "minor_units!"
+        FROM transactions AS t
+        INNER JOIN accounts AS acc ON acc.id = t.account_id
+        INNER JOIN assets AS src ON src.id = t.asset_id
+        INNER JOIN assets AS dst ON dst.id = acc.default_asset_id
+        INNER JOIN fiat_assets AS f ON f.asset_id = acc.default_asset_id
+        WHERE t.deleted_at IS NULL AND t.account_amount IS NULL
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut filled = 0;
+    for row in pending {
+        let (account_amount, fx_rate, fx_rate_date) = compute_conversion(
+            cache,
+            SourceAmount {
+                asset_id: row.asset_id,
+                code: &row.source_code,
+                amount: &row.amount,
+            },
+            TargetCurrency {
+                asset_id: row.default_asset_id,
+                code: &row.account_code,
+                minor_units: row.minor_units,
+            },
+            row.booking_date,
+        )
+        .await?;
+
+        if account_amount.is_none() {
+            continue; // still no rate for that date
+        }
+
+        sqlx::query!(
+            r#"
+            UPDATE transactions
+            SET account_amount = $2, fx_rate = $3, fx_rate_date = $4
+            WHERE id = $1
+            "#,
+            row.id,
+            account_amount,
+            fx_rate,
+            fx_rate_date,
+        )
+        .execute(pool)
+        .await?;
+        filled += 1;
+    }
+
+    Ok(filled)
 }
 
 /// Pure-input validation tests.
@@ -644,6 +951,43 @@ mod tests {
         assert!(parse_cursor("2026-01-15_not-a-uuid").is_err());
         assert!(parse_cursor("15-01-2026_00000000-0000-0000-0000-000000000000").is_err());
     }
+
+    #[test]
+    fn resolve_dates_collapses_cash_and_rejects_a_backwards_value_date() {
+        let booking = NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
+        let earlier = NaiveDate::from_ymd_opt(2026, 1, 10).unwrap();
+        let later = NaiveDate::from_ymd_opt(2026, 1, 20).unwrap();
+
+        // Cash: value date is forced equal to the booking date, whatever came in.
+        assert_eq!(
+            resolve_dates(booking, Some(later), true).unwrap(),
+            (booking, Some(booking))
+        );
+        assert_eq!(
+            resolve_dates(booking, None, true).unwrap(),
+            (booking, Some(booking))
+        );
+
+        // Non-cash: blank stays blank; on/after the booking date passes through.
+        assert_eq!(
+            resolve_dates(booking, None, false).unwrap(),
+            (booking, None)
+        );
+        assert_eq!(
+            resolve_dates(booking, Some(booking), false).unwrap(),
+            (booking, Some(booking))
+        );
+        assert_eq!(
+            resolve_dates(booking, Some(later), false).unwrap(),
+            (booking, Some(later))
+        );
+
+        // Non-cash: before the booking date is rejected.
+        assert!(matches!(
+            resolve_dates(booking, Some(earlier), false),
+            Err(TransactionError::InvalidInput(_))
+        ));
+    }
 }
 
 /// Authorization: every query here is scoped by `user_id`. `list` returns only
@@ -659,11 +1003,21 @@ mod tests {
 /// at another user's category cannot be inserted in the first place.
 #[cfg(test)]
 mod db_tests {
+    use std::sync::Arc;
+
     use super::*;
+    use crate::server::assets::fx_cache::FxRateCache;
     use crate::server::test_support::{
         create_user, currency_id, date, dec, insert_transaction, insert_transfer,
     };
     use crate::server::{accounts, categories, merchants};
+
+    /// A rate cache with no HTTP reach. Every fixture below is single-currency,
+    /// so `create` / `update` never resolve a rate; the cross-currency cases
+    /// seed it directly.
+    fn fx_cache() -> Arc<FxRateCache> {
+        FxRateCache::new().expect("build fx cache")
+    }
 
     /// The caller's transactions on one account, newest first (first page).
     async fn account_rows(
@@ -934,6 +1288,7 @@ mod db_tests {
 
         create(
             &pool,
+            &fx_cache(),
             alice,
             account.id,
             &write(eur, "10.00", date(2026, 1, 15)),
@@ -944,6 +1299,7 @@ mod db_tests {
         // Bob cannot record a transaction on Alice's account.
         let denied = create(
             &pool,
+            &fx_cache(),
             bob,
             account.id,
             &write(eur, "10.00", date(2026, 1, 15)),
@@ -957,15 +1313,16 @@ mod db_tests {
     }
 
     #[sqlx::test]
-    async fn create_stores_the_value_date_only_when_given(pool: PgPool) {
+    async fn a_bank_account_stores_the_value_date_only_when_given(pool: PgPool) {
         let alice = create_user(&pool, "alice@example.test").await;
         let eur = currency_id(&pool, "EUR").await;
-        let account = accounts::create(&pool, alice, "Alice Cash", "cash", eur)
+        let account = accounts::create(&pool, alice, "Alice Bank", "bank", eur)
             .await
             .expect("alice's account");
 
         create(
             &pool,
+            &fx_cache(),
             alice,
             account.id,
             &write(eur, "10.00", date(2026, 1, 15)),
@@ -974,6 +1331,7 @@ mod db_tests {
         .expect("no value date");
         create(
             &pool,
+            &fx_cache(),
             alice,
             account.id,
             &TransactionWrite {
@@ -991,6 +1349,59 @@ mod db_tests {
     }
 
     #[sqlx::test]
+    async fn a_cash_account_forces_the_value_date_equal_to_the_booking_date(pool: PgPool) {
+        let alice = create_user(&pool, "alice@example.test").await;
+        let eur = currency_id(&pool, "EUR").await;
+        let account = accounts::create(&pool, alice, "Alice Cash", "cash", eur)
+            .await
+            .expect("alice's account");
+
+        // Even a value date the caller supplied is overridden.
+        create(
+            &pool,
+            &fx_cache(),
+            alice,
+            account.id,
+            &TransactionWrite {
+                value_date: Some(date(2026, 1, 20)),
+                ..write(eur, "10.00", date(2026, 1, 15))
+            },
+        )
+        .await
+        .expect("cash transaction");
+
+        let rows = account_rows(&pool, alice, account.id).await;
+        assert_eq!(rows[0].value_date, Some(date(2026, 1, 15)));
+    }
+
+    #[sqlx::test]
+    async fn a_value_date_before_the_booking_date_is_rejected(pool: PgPool) {
+        let alice = create_user(&pool, "alice@example.test").await;
+        let eur = currency_id(&pool, "EUR").await;
+        let account = accounts::create(&pool, alice, "Alice Bank", "bank", eur)
+            .await
+            .expect("alice's account");
+
+        let denied = create(
+            &pool,
+            &fx_cache(),
+            alice,
+            account.id,
+            &TransactionWrite {
+                value_date: Some(date(2026, 1, 10)),
+                ..write(eur, "10.00", date(2026, 1, 15))
+            },
+        )
+        .await;
+        assert!(matches!(
+            denied,
+            Err(TransactionError::InvalidInput(
+                "the value date cannot be before the booking date"
+            ))
+        ));
+    }
+
+    #[sqlx::test]
     async fn update_denies_another_users_transaction_and_leaves_it_unchanged(pool: PgPool) {
         let alice = create_user(&pool, "alice@example.test").await;
         let bob = create_user(&pool, "bob@example.test").await;
@@ -1005,6 +1416,7 @@ mod db_tests {
 
         let denied = update(
             &pool,
+            &fx_cache(),
             bob,
             transaction,
             &write(usd, "-999.00", date(2026, 2, 1)),
@@ -1097,6 +1509,7 @@ mod db_tests {
 
         update(
             &pool,
+            &fx_cache(),
             alice,
             source,
             &write(eur, "-5.00", date(2026, 1, 16)),
@@ -1202,6 +1615,7 @@ mod db_tests {
 
         let id = create(
             &pool,
+            &fx_cache(),
             alice,
             account.id,
             &TransactionWrite {
@@ -1222,6 +1636,7 @@ mod db_tests {
         // Update swaps the category and clears the merchant.
         update(
             &pool,
+            &fx_cache(),
             alice,
             id,
             &TransactionWrite {
@@ -1269,6 +1684,7 @@ mod db_tests {
         assert!(matches!(
             create(
                 &pool,
+                &fx_cache(),
                 alice,
                 account.id,
                 &TransactionWrite {
@@ -1282,6 +1698,7 @@ mod db_tests {
         assert!(matches!(
             create(
                 &pool,
+                &fx_cache(),
                 alice,
                 account.id,
                 &TransactionWrite {
@@ -1296,6 +1713,7 @@ mod db_tests {
         // A soft-deleted own category / merchant is refused too.
         let id = create(
             &pool,
+            &fx_cache(),
             alice,
             account.id,
             &write(eur, "-1.00", date(2026, 1, 15)),
@@ -1311,6 +1729,7 @@ mod db_tests {
         assert!(matches!(
             update(
                 &pool,
+                &fx_cache(),
                 alice,
                 id,
                 &TransactionWrite {
@@ -1324,6 +1743,7 @@ mod db_tests {
         assert!(matches!(
             update(
                 &pool,
+                &fx_cache(),
                 alice,
                 id,
                 &TransactionWrite {
@@ -1334,5 +1754,104 @@ mod db_tests {
             .await,
             Err(TransactionError::UnknownMerchant)
         ));
+    }
+
+    #[sqlx::test]
+    async fn a_foreign_transaction_is_recorded_in_the_account_currency(pool: PgPool) {
+        use sqlx::types::chrono::{DateTime, Utc};
+
+        let alice = create_user(&pool, "alice@example.test").await;
+        let eur = currency_id(&pool, "EUR").await;
+        let usd = currency_id(&pool, "USD").await;
+        let account = accounts::create(&pool, alice, "Alice Bank", "bank", eur)
+            .await
+            .expect("account");
+        let booking = date(2026, 3, 4);
+        let cache = FxRateCache::new().expect("cache");
+
+        // No USD -> EUR rate: the transaction records with a pending conversion.
+        create(
+            &pool,
+            &cache,
+            alice,
+            account.id,
+            &write(usd, "100.00", booking),
+        )
+        .await
+        .expect("pending");
+        let rows = account_rows(&pool, alice, account.id).await;
+        assert_eq!(rows[0].account_amount, None);
+        assert_eq!(rows[0].fx_rate, None);
+
+        // With a seeded rate, a foreign transaction is converted and rounded.
+        let as_of =
+            DateTime::<Utc>::from_naive_utc_and_offset(booking.and_hms_opt(0, 0, 0).unwrap(), Utc);
+        cache.seed("USD", booking, as_of, &[("EUR", "0.905")]);
+        create(
+            &pool,
+            &cache,
+            alice,
+            account.id,
+            &write(usd, "100.00", booking),
+        )
+        .await
+        .expect("converted");
+        let rows = account_rows(&pool, alice, account.id).await;
+        // 100 * 0.905 = 90.500 -> 90.50 at 2 minor units.
+        assert_eq!(rows[0].account_amount, Some(dec("90.50")));
+        assert_eq!(rows[0].fx_rate, Some(dec("0.905")));
+
+        // A same-currency transaction just copies the amount, no rate.
+        create(
+            &pool,
+            &cache,
+            alice,
+            account.id,
+            &write(eur, "25.00", booking),
+        )
+        .await
+        .expect("home currency");
+        let rows = account_rows(&pool, alice, account.id).await;
+        assert_eq!(rows[0].account_amount, Some(dec("25.00")));
+        assert_eq!(rows[0].fx_rate, None);
+    }
+
+    #[sqlx::test]
+    async fn backfill_fills_a_pending_conversion_once_a_rate_is_seeded(pool: PgPool) {
+        use sqlx::types::chrono::{DateTime, Utc};
+
+        let alice = create_user(&pool, "alice@example.test").await;
+        let eur = currency_id(&pool, "EUR").await;
+        let usd = currency_id(&pool, "USD").await;
+        let account = accounts::create(&pool, alice, "Alice Bank", "bank", eur)
+            .await
+            .expect("account");
+        let booking = date(2026, 5, 6);
+        let cache = FxRateCache::new().expect("cache");
+
+        create(
+            &pool,
+            &cache,
+            alice,
+            account.id,
+            &write(usd, "10.00", booking),
+        )
+        .await
+        .expect("pending");
+        assert_eq!(
+            backfill_account_amounts(&pool, &cache).await.expect("runs"),
+            0
+        );
+
+        let as_of =
+            DateTime::<Utc>::from_naive_utc_and_offset(booking.and_hms_opt(0, 0, 0).unwrap(), Utc);
+        cache.seed("USD", booking, as_of, &[("EUR", "0.8")]);
+        assert_eq!(
+            backfill_account_amounts(&pool, &cache).await.expect("runs"),
+            1
+        );
+
+        let rows = account_rows(&pool, alice, account.id).await;
+        assert_eq!(rows[0].account_amount, Some(dec("8.00")));
     }
 }

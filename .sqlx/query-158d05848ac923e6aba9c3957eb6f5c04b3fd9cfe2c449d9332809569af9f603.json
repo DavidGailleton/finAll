@@ -1,0 +1,38 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE transactions\n        SET asset_id = $3,\n            amount = $4,\n            booking_date = $5,\n            value_date = $6,\n            category_id = $7,\n            merchant_id = $8,\n            account_amount = $9,\n            fx_rate = $10,\n            fx_rate_date = $11,\n            updated_at = now()\n        WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL\n        RETURNING id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "transactions",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Uuid",
+        "Numeric",
+        "Date",
+        "Date",
+        "Uuid",
+        "Uuid",
+        "Numeric",
+        "Numeric",
+        "Date"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "158d05848ac923e6aba9c3957eb6f5c04b3fd9cfe2c449d9332809569af9f603"
+}

@@ -7,6 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::accounts::types::AccountType;
+
 /// One of the user's transactions, in the shape the browser is allowed to see.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TransactionDto {
@@ -18,10 +20,26 @@ pub struct TransactionDto {
     /// Name of that account. Shown on the global transaction list; the
     /// per-account list ignores it.
     pub account_name: String,
+    /// The account's kind — the add/edit form shows a single date field for a
+    /// `Cash` account.
+    pub account_type: AccountType,
+    /// Id of the account's default currency, rendered as a string. Used to tell
+    /// whether this transaction is in a foreign currency.
+    pub account_default_asset_id: String,
+    /// Alphabetic code of the account's default currency, for rendering the
+    /// converted amount.
+    pub account_currency_code: String,
     /// The signed transaction amount, exactly as stored (`NUMERIC(38, 18)`),
     /// rendered as a decimal string. Never rounded, truncated, or parsed
     /// through a floating-point value.
     pub amount: String,
+    /// The amount in the account's currency, translated at the booking-date
+    /// rate. `None` when the transaction is already in the account currency or
+    /// its conversion is still pending.
+    pub account_amount: Option<String>,
+    /// The rate used for that conversion, as a decimal string; `None` in the
+    /// same cases as `account_amount`.
+    pub fx_rate: Option<String>,
     /// Id of the transaction's own currency (a fiat `assets` row), rendered as
     /// a string for the same reason as `id`. May differ from the account's
     /// default currency; used to pre-select the edit form's currency field.

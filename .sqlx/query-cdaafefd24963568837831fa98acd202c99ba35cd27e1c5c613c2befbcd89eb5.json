@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE transactions\n            SET account_amount = $2, fx_rate = $3, fx_rate_date = $4\n            WHERE id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Numeric",
+        "Numeric",
+        "Date"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cdaafefd24963568837831fa98acd202c99ba35cd27e1c5c613c2befbcd89eb5"
+}
