@@ -18,6 +18,7 @@ use sqlx::PgPool;
 
 use crate::server::accounts::{self, AccountError};
 use crate::server::assets::conversion::{self, ConversionError};
+use crate::server::assets::fx_cache::FxRateCache;
 use crate::server::assets::rates::{self, RateResolutionError, ResolvedRate};
 
 /// Rounding applied when a sub-balance is converted into the default currency,
@@ -81,6 +82,7 @@ impl From<ConversionError> for BalanceError {
 /// account holds.
 pub struct AccountBalanceRow {
     pub asset_id: Uuid,
+    pub alphabetic_code: String,
     pub balance: BigDecimal,
 }
 
@@ -141,6 +143,7 @@ pub fn sum_in_default_currency(
 /// currency. Fails if any currency the account holds cannot be valued.
 pub async fn account_total(
     pool: &PgPool,
+    cache: &FxRateCache,
     user_id: Uuid,
     account_id: Uuid,
 ) -> Result<TotalBalance, BalanceError> {
@@ -153,7 +156,8 @@ pub async fn account_total(
         if row.asset_id == default.asset_id || resolved.contains_key(&row.asset_id) {
             continue;
         }
-        let rate = rates::resolve_rate(pool, row.asset_id, default.asset_id).await?;
+        let rate =
+            rates::resolve_rate(cache, &row.alphabetic_code, &default.alphabetic_code).await?;
         resolved.insert(row.asset_id, rate);
     }
 
@@ -199,10 +203,12 @@ async fn balance_rows(
         AccountBalanceRow,
         r#"
         SELECT
-            asset_id AS "asset_id!",
-            balance AS "balance!"
-        FROM account_balances
-        WHERE user_id = $1 AND account_id = $2
+            ab.asset_id AS "asset_id!",
+            a.code AS "alphabetic_code!",
+            ab.balance AS "balance!"
+        FROM account_balances AS ab
+        INNER JOIN assets AS a ON a.id = ab.asset_id
+        WHERE ab.user_id = $1 AND ab.account_id = $2
         "#,
         user_id,
         account_id,
@@ -250,6 +256,9 @@ mod tests {
     fn row(asset_n: u128, balance: &str) -> AccountBalanceRow {
         AccountBalanceRow {
             asset_id: asset(asset_n),
+            // `sum_in_default_currency` keys the resolved rate by `asset_id`; the
+            // code is only along for the on-demand fetch it never triggers here.
+            alphabetic_code: if asset_n == 1 { "EUR" } else { "USD" }.to_owned(),
             balance: dec(balance),
         }
     }
@@ -317,8 +326,16 @@ mod tests {
 /// the conversion arithmetic is covered by the pure tests above.
 #[cfg(test)]
 mod db_tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::server::test_support::{create_user, currency_id, date, dec, insert_transaction};
+
+    /// A rate cache with no HTTP reach — every fixture below is single-currency,
+    /// so no rate is ever resolved.
+    fn fx_cache() -> Arc<FxRateCache> {
+        FxRateCache::new().expect("build fx cache")
+    }
 
     #[sqlx::test]
     async fn account_total_denies_another_users_account(pool: PgPool) {
@@ -331,11 +348,11 @@ mod db_tests {
             .expect("alice's account");
         insert_transaction(&pool, alice, account.id, eur, "100.00", date(2026, 1, 15)).await;
 
-        let denied = account_total(&pool, bob, account.id).await;
+        let denied = account_total(&pool, &fx_cache(), bob, account.id).await;
         assert!(matches!(denied, Err(BalanceError::NotFound)));
 
         // Control: the owner gets the figure, so the account is valuable.
-        let total = account_total(&pool, alice, account.id)
+        let total = account_total(&pool, &fx_cache(), alice, account.id)
             .await
             .expect("owner reads it");
         assert_eq!(total.amount, dec("100.00"));
@@ -362,7 +379,7 @@ mod db_tests {
         insert_transaction(&pool, alice, second.id, eur, "999.00", date(2026, 1, 15)).await;
         insert_transaction(&pool, bob, bobs.id, eur, "777.00", date(2026, 1, 15)).await;
 
-        let total = account_total(&pool, alice, first.id)
+        let total = account_total(&pool, &fx_cache(), alice, first.id)
             .await
             .expect("owner reads it");
         assert_eq!(total.amount, dec("125.50"));
@@ -380,7 +397,7 @@ mod db_tests {
 
         // An account the caller owns but that holds nothing is a zero balance,
         // not the `NotFound` a foreign account produces.
-        let total = account_total(&pool, alice, account.id)
+        let total = account_total(&pool, &fx_cache(), alice, account.id)
             .await
             .expect("owner reads it");
         assert_eq!(total.amount, dec("0"));

@@ -25,6 +25,7 @@ use sqlx::PgPool;
 
 use crate::server::assets::conversion::{self, ConversionError};
 use crate::server::assets::currency::{self, CurrencyError};
+use crate::server::assets::fx_cache::FxRateCache;
 use crate::server::assets::rates::{self, RateResolutionError, ResolvedRate};
 
 /// Rounding applied when a currency position is converted into the display
@@ -206,6 +207,7 @@ pub fn value_positions(
 /// errors internally; a merely missing rate yields an incomplete report.
 pub async fn report(
     pool: &PgPool,
+    cache: &FxRateCache,
     user_id: Uuid,
     display_currency_code: &str,
 ) -> Result<ValuedReport, NetWorthError> {
@@ -218,7 +220,7 @@ pub async fn report(
         if position.asset_id == display.asset_id || resolved.contains_key(&position.asset_id) {
             continue;
         }
-        match rates::resolve_rate(pool, position.asset_id, display.asset_id).await {
+        match rates::resolve_rate(cache, &position.currency_code, &display.alphabetic_code).await {
             Ok(rate) => {
                 resolved.insert(position.asset_id, rate);
             }
@@ -456,9 +458,17 @@ mod tests {
 
 #[cfg(test)]
 mod db_tests {
+    use std::sync::Arc;
+
     use super::*;
     use crate::server::accounts;
     use crate::server::test_support::{create_user, currency_id, date, dec, insert_transaction};
+
+    /// A rate cache with no HTTP reach — every fixture below is single-currency,
+    /// so no rate is ever resolved.
+    fn fx_cache() -> Arc<FxRateCache> {
+        FxRateCache::new().expect("build fx cache")
+    }
 
     #[sqlx::test]
     async fn a_currency_is_summed_across_the_users_accounts(pool: PgPool) {
@@ -475,7 +485,9 @@ mod db_tests {
         insert_transaction(&pool, alice, cash.id, eur, "100.00", date(2026, 1, 15)).await;
         insert_transaction(&pool, alice, bank.id, eur, "25.50", date(2026, 1, 16)).await;
 
-        let report = report(&pool, alice, "EUR").await.expect("a report");
+        let report = report(&pool, &fx_cache(), alice, "EUR")
+            .await
+            .expect("a report");
 
         assert_eq!(report.lines.len(), 1);
         assert_eq!(report.total, dec("125.50"));
@@ -499,7 +511,9 @@ mod db_tests {
         insert_transaction(&pool, alice, alices.id, eur, "100.00", date(2026, 1, 15)).await;
         insert_transaction(&pool, bob, bobs.id, eur, "777.00", date(2026, 1, 15)).await;
 
-        let report = report(&pool, alice, "EUR").await.expect("a report");
+        let report = report(&pool, &fx_cache(), alice, "EUR")
+            .await
+            .expect("a report");
         assert_eq!(report.total, dec("100.00"));
     }
 
@@ -512,7 +526,9 @@ mod db_tests {
             .await
             .expect("alice's account");
 
-        let report = report(&pool, alice, "EUR").await.expect("a report");
+        let report = report(&pool, &fx_cache(), alice, "EUR")
+            .await
+            .expect("a report");
         assert!(report.lines.is_empty());
         assert_eq!(report.total, dec("0"));
         assert!(report.complete);
@@ -522,7 +538,7 @@ mod db_tests {
     async fn an_unknown_display_currency_is_rejected(pool: PgPool) {
         let alice = create_user(&pool, "alice@example.test").await;
 
-        let denied = report(&pool, alice, "ZZZ").await;
+        let denied = report(&pool, &fx_cache(), alice, "ZZZ").await;
         assert!(matches!(denied, Err(NetWorthError::CurrencyNotFound)));
     }
 
@@ -536,8 +552,10 @@ mod db_tests {
             .expect("alice's account");
         insert_transaction(&pool, alice, account.id, eur, "42.00", date(2026, 1, 15)).await;
 
-        // `asset_rates` is empty in a fresh test database.
-        let report = report(&pool, alice, "EUR").await.expect("a report");
+        // Single currency, so no rate is ever resolved — the cache is unused.
+        let report = report(&pool, &fx_cache(), alice, "EUR")
+            .await
+            .expect("a report");
         assert!(report.complete);
         assert_eq!(report.total, dec("42.00"));
     }

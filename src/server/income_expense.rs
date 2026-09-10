@@ -20,13 +20,14 @@ use std::collections::HashMap;
 
 use bigdecimal::{BigDecimal, RoundingMode, Signed, Zero};
 use leptos::logging;
-use sqlx::types::chrono::{DateTime, NaiveDate, Utc};
+use sqlx::types::chrono::NaiveDate;
 use sqlx::types::Uuid;
 use sqlx::PgPool;
 
 use crate::categories::types::CategoryKind;
 use crate::server::assets::conversion::{self, ConversionError};
 use crate::server::assets::currency::{self, CurrencyError};
+use crate::server::assets::fx_cache::FxRateCache;
 use crate::server::assets::rates::{self, RateResolutionError, ResolvedRate};
 
 /// Rounding applied when a `(category, currency)` subtotal is converted into the
@@ -350,6 +351,7 @@ pub fn summarise(
 /// `display_currency_code`, valued at the rate in force on `to`.
 pub async fn report(
     pool: &PgPool,
+    cache: &FxRateCache,
     user_id: Uuid,
     display_currency_code: &str,
     from: &str,
@@ -360,22 +362,21 @@ pub async fn report(
     let display = display_currency(pool, &code).await?;
     let subtotals = subtotals(pool, user_id, from, to).await?;
 
-    // Every conversion is anchored to the period-end date at 00:00:00Z — the
-    // same instant convention `asset_rates.observed_at` uses.
-    let as_of = to
-        .and_hms_opt(0, 0, 0)
-        .map(|naive| DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc))
-        .ok_or_else(|| {
-            logging::error!("income vs expense: could not anchor an as-of instant for {to}");
-            IncomeExpenseError::Internal
-        })?;
-
+    // Every conversion is anchored to the period-end date: the rate in force on
+    // `to` (Frankfurter carries a non-trading day forward to the last one).
     let mut resolved: HashMap<Uuid, ResolvedRate> = HashMap::new();
     for subtotal in &subtotals {
         if subtotal.asset_id == display.asset_id || resolved.contains_key(&subtotal.asset_id) {
             continue;
         }
-        match rates::resolve_rate_as_of(pool, subtotal.asset_id, display.asset_id, as_of).await {
+        match rates::resolve_rate_as_of(
+            cache,
+            &subtotal.currency_code,
+            &display.alphabetic_code,
+            to,
+        )
+        .await
+        {
             Ok(rate) => {
                 resolved.insert(subtotal.asset_id, rate);
             }
@@ -527,8 +528,11 @@ async fn subtotals(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::str::FromStr;
+
+    use sqlx::types::chrono::{DateTime, Utc};
+
+    use super::*;
 
     fn dec(s: &str) -> BigDecimal {
         BigDecimal::from_str(s).expect("valid decimal literal")
@@ -746,40 +750,19 @@ mod tests {
 
 #[cfg(test)]
 mod db_tests {
+    use std::sync::Arc;
+
     use super::*;
+    use crate::server::assets::fx_cache::FxRateCache;
     use crate::server::test_support::{
         create_user, currency_id, date, dec, insert_transaction, insert_transfer,
     };
     use crate::server::{accounts, categories, transactions};
 
-    fn midnight_utc(year: i32, month: u32, day: u32) -> DateTime<Utc> {
-        let naive = NaiveDate::from_ymd_opt(year, month, day)
-            .unwrap()
-            .and_hms_opt(0, 0, 0)
-            .unwrap();
-        DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc)
-    }
-
-    async fn insert_observation(
-        pool: &PgPool,
-        base_asset_id: Uuid,
-        quote_asset_id: Uuid,
-        rate: &str,
-        observed_at: DateTime<Utc>,
-    ) {
-        sqlx::query(
-            r#"
-            INSERT INTO asset_rates (base_asset_id, quote_asset_id, rate, rate_source, observed_at)
-            VALUES ($1, $2, $3, 'test', $4)
-            "#,
-        )
-        .bind(base_asset_id)
-        .bind(quote_asset_id)
-        .bind(dec(rate))
-        .bind(observed_at)
-        .execute(pool)
-        .await
-        .expect("insert test observation");
+    /// A rate cache with no HTTP reach: single-currency fixtures never resolve a
+    /// rate, and the one cross-currency test seeds this directly.
+    fn fx_cache() -> Arc<FxRateCache> {
+        FxRateCache::new().expect("build fx cache")
     }
 
     async fn categorised_transaction(
@@ -840,7 +823,7 @@ mod db_tests {
         )
         .await;
 
-        let report = report(&pool, alice, "EUR", "2026-01-01", "2026-01-31")
+        let report = report(&pool, &fx_cache(), alice, "EUR", "2026-01-01", "2026-01-31")
             .await
             .expect("report");
 
@@ -883,7 +866,7 @@ mod db_tests {
         )
         .await;
 
-        let report = report(&pool, alice, "EUR", "2026-03-01", "2026-03-31")
+        let report = report(&pool, &fx_cache(), alice, "EUR", "2026-03-01", "2026-03-31")
             .await
             .expect("report");
 
@@ -909,7 +892,7 @@ mod db_tests {
         insert_transaction(&pool, alice, account.id, eur, "20", date(2026, 1, 31)).await;
         insert_transaction(&pool, alice, account.id, eur, "40", date(2026, 2, 1)).await;
 
-        let report = report(&pool, alice, "EUR", "2026-01-01", "2026-01-31")
+        let report = report(&pool, &fx_cache(), alice, "EUR", "2026-01-01", "2026-01-31")
             .await
             .expect("report");
 
@@ -932,7 +915,7 @@ mod db_tests {
 
         insert_transaction(&pool, alice, checking.id, eur, "1000", date(2026, 1, 2)).await;
 
-        let before = report(&pool, alice, "EUR", "2026-01-01", "2026-01-31")
+        let before = report(&pool, &fx_cache(), alice, "EUR", "2026-01-01", "2026-01-31")
             .await
             .expect("report");
 
@@ -942,7 +925,7 @@ mod db_tests {
             insert_transaction(&pool, alice, savings.id, eur, "300", date(2026, 1, 10)).await;
         insert_transfer(&pool, alice, source, destination).await;
 
-        let after = report(&pool, alice, "EUR", "2026-01-01", "2026-01-31")
+        let after = report(&pool, &fx_cache(), alice, "EUR", "2026-01-01", "2026-01-31")
             .await
             .expect("report");
 
@@ -965,7 +948,7 @@ mod db_tests {
         insert_transaction(&pool, alice, alices.id, eur, "100", date(2026, 1, 15)).await;
         insert_transaction(&pool, bob, bobs.id, eur, "777", date(2026, 1, 15)).await;
 
-        let report = report(&pool, alice, "EUR", "2026-01-01", "2026-01-31")
+        let report = report(&pool, &fx_cache(), alice, "EUR", "2026-01-01", "2026-01-31")
             .await
             .expect("report");
         assert_eq!(report.net, dec("100"));
@@ -988,7 +971,7 @@ mod db_tests {
             .await
             .expect("soft delete");
 
-        let report = report(&pool, alice, "EUR", "2026-01-01", "2026-01-31")
+        let report = report(&pool, &fx_cache(), alice, "EUR", "2026-01-01", "2026-01-31")
             .await
             .expect("report");
         assert_eq!(report.net, dec("60"));
@@ -1019,7 +1002,7 @@ mod db_tests {
             .await
             .expect("soft delete category");
 
-        let report = report(&pool, alice, "EUR", "2026-01-01", "2026-01-31")
+        let report = report(&pool, &fx_cache(), alice, "EUR", "2026-01-01", "2026-01-31")
             .await
             .expect("report");
 
@@ -1034,14 +1017,14 @@ mod db_tests {
     #[sqlx::test]
     async fn an_unknown_display_currency_is_rejected(pool: PgPool) {
         let alice = create_user(&pool, "alice@example.test").await;
-        let denied = report(&pool, alice, "ZZZ", "2026-01-01", "2026-01-31").await;
+        let denied = report(&pool, &fx_cache(), alice, "ZZZ", "2026-01-01", "2026-01-31").await;
         assert!(matches!(denied, Err(IncomeExpenseError::CurrencyNotFound)));
     }
 
     #[sqlx::test]
     async fn a_reversed_period_is_rejected(pool: PgPool) {
         let alice = create_user(&pool, "alice@example.test").await;
-        let denied = report(&pool, alice, "EUR", "2026-02-01", "2026-01-01").await;
+        let denied = report(&pool, &fx_cache(), alice, "EUR", "2026-02-01", "2026-01-01").await;
         assert!(matches!(
             denied,
             Err(IncomeExpenseError::InvalidInput(
@@ -1052,8 +1035,9 @@ mod db_tests {
 
     #[sqlx::test]
     async fn a_foreign_currency_needs_an_as_of_rate(pool: PgPool) {
+        use sqlx::types::chrono::{DateTime, Utc};
+
         let alice = create_user(&pool, "alice@example.test").await;
-        let eur = currency_id(&pool, "EUR").await;
         let usd = currency_id(&pool, "USD").await;
         let account = accounts::create(&pool, alice, "USD Account", "bank", usd)
             .await
@@ -1073,10 +1057,10 @@ mod db_tests {
         )
         .await;
 
-        // Only an observation dated after the period end exists.
-        insert_observation(&pool, eur, usd, "1.10", midnight_utc(2026, 7, 1)).await;
-
-        let incomplete = report(&pool, alice, "EUR", "2026-06-01", "2026-06-30")
+        // Nothing cached or fetchable for the period -> the line is unvalued and
+        // the report is incomplete.
+        let cache = FxRateCache::new().expect("cache");
+        let incomplete = report(&pool, &cache, alice, "EUR", "2026-06-01", "2026-06-30")
             .await
             .expect("report");
         assert!(!incomplete.complete);
@@ -1084,14 +1068,19 @@ mod db_tests {
         assert_eq!(incomplete.expense_lines[0].converted_net, None);
         assert_eq!(incomplete.total_expense, dec("0"));
 
-        // Add an observation on or before the period end.
-        insert_observation(&pool, eur, usd, "1.25", midnight_utc(2026, 6, 1)).await;
+        // Seed the direct USD -> EUR rate for the period-end date.
+        let period_end = date(2026, 6, 30);
+        let as_of = DateTime::<Utc>::from_naive_utc_and_offset(
+            date(2026, 6, 1).and_hms_opt(0, 0, 0).unwrap(),
+            Utc,
+        );
+        cache.seed("USD", period_end, as_of, &[("EUR", "0.8")]);
 
-        let complete = report(&pool, alice, "EUR", "2026-06-01", "2026-06-30")
+        let complete = report(&pool, &cache, alice, "EUR", "2026-06-01", "2026-06-30")
             .await
             .expect("report");
         assert!(complete.complete);
-        // -50 USD / 1.25 (USD per EUR) -> -40.00 EUR, via the inverse branch.
+        // -50 USD * 0.8 EUR/USD -> -40.00 EUR.
         assert_eq!(complete.expense_lines[0].converted_net, Some(dec("-40.00")));
         assert_eq!(complete.total_expense, dec("-40.00"));
     }

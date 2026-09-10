@@ -50,59 +50,37 @@ async fn main() {
         }
     });
 
-    // Pull currencies and exchange rates from Frankfurter only when explicitly
-    // opted in with `FETCH_FX_RATES=1` (or `true`). Off by default; manual entry
-    // is the primary path. Both jobs run once at startup (catching up a missed
-    // boundary) and are idempotent.
-    let fetch_fx_rates = std::env::var("FETCH_FX_RATES")
-        .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true"))
-        .unwrap_or(false);
-    if fetch_fx_rates {
-        use fin_all::server::assets::{fx_sync, schedule};
-        use sqlx::types::chrono::Utc;
+    // One in-memory Frankfurter rate cache for the whole process, handed to
+    // server functions alongside the pool. Exchange rates are fetched on demand
+    // and never persisted.
+    let fx_cache = fin_all::server::assets::fx_cache::FxRateCache::new()
+        .expect("could not build the Frankfurter HTTP client");
 
-        // Daily at 00:00 UTC: rates for every currency in use (plus EUR).
-        tokio::spawn({
-            let pool = pool.clone();
-            async move {
-                loop {
-                    match fx_sync::sync_rates(&pool).await {
-                        Ok(summary) if summary.inserted > 0 => log!(
-                            "fx rates: stored {} rate(s) from {} base(s), {} failed",
-                            summary.inserted,
-                            summary.bases_ok,
-                            summary.bases_failed,
-                        ),
-                        Ok(_) => {}
-                        Err(_) => log!("fx rates: run failed"),
-                    }
-                    tokio::time::sleep(schedule::duration_until_next_utc_midnight(Utc::now()))
-                        .await;
+    // Keep the currency list in step with Frankfurter's `/v2/currencies`: run
+    // once now (startup) and then on the 1st of each month at 00:00 UTC. A new
+    // currency is inserted; an existing one is refreshed only when its name,
+    // symbol, or numeric code actually changed.
+    tokio::spawn({
+        let pool = pool.clone();
+        async move {
+            use fin_all::server::assets::{fx_sync, schedule};
+            use sqlx::types::chrono::Utc;
+
+            loop {
+                match fx_sync::sync_currencies(&pool).await {
+                    Ok(summary) => log!(
+                        "currencies: {} new, {} refreshed, {} unchanged, {} skipped",
+                        summary.inserted,
+                        summary.updated,
+                        summary.unchanged,
+                        summary.skipped,
+                    ),
+                    Err(_) => log!("currencies: sync failed"),
                 }
+                tokio::time::sleep(schedule::duration_until_next_month_start(Utc::now())).await;
             }
-        });
-
-        // Monthly on the 1st at 00:00 UTC: refresh the currency list.
-        tokio::spawn({
-            let pool = pool.clone();
-            async move {
-                loop {
-                    match fx_sync::sync_currencies(&pool).await {
-                        Ok(summary) => log!(
-                            "currencies: {} new, {} refreshed, {} skipped",
-                            summary.inserted,
-                            summary.updated,
-                            summary.skipped,
-                        ),
-                        Err(_) => log!("currencies: sync failed"),
-                    }
-                    tokio::time::sleep(schedule::duration_until_next_month_start(Utc::now())).await;
-                }
-            }
-        });
-
-        log!("frankfurter: daily rates + monthly currency sync enabled");
-    }
+        }
+    });
 
     let app = Router::new()
         .route(
@@ -117,7 +95,11 @@ async fn main() {
             routes,
             {
                 let pool = pool.clone();
-                move || provide_context(pool.clone())
+                let fx_cache = fx_cache.clone();
+                move || {
+                    provide_context(pool.clone());
+                    provide_context(fx_cache.clone());
+                }
             },
             {
                 let leptos_options = leptos_options.clone();

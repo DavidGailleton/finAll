@@ -1,20 +1,20 @@
 //! The Frankfurter v2 API client (`api.frankfurter.dev`; override the host with
 //! `FRANKFURTER_URL`). Fetch and parse only — this module never touches the
-//! database. Persisting what it returns is [`crate::server::assets::fx_sync`]'s
-//! job; combining stored rates into a conversion is
-//! [`crate::server::assets::rates`]'s.
+//! database. Memoising rate lookups is [`crate::server::assets::fx_cache`]'s
+//! job and the currency-list upsert is [`crate::server::assets::fx_sync`]'s.
 //!
-//! Two endpoints are used:
+//! Three requests are used, all returning a JSON array of `{date, base, quote,
+//! rate}` (rates) or `{iso_code, iso_numeric, name, symbol, …}` (currencies):
 //!
-//! - `GET /v2/rates?base=<code>` → a JSON array of `{date, base, quote, rate}`.
-//!   [`fetch_rates`] retries a timeout or 5xx a few times, then parses each row
-//!   into a [`ReferenceRate`] (an exact positive `base -> quote` rate at its
-//!   reference date, parsed straight from the response text into a
-//!   [`BigDecimal`], never through `f64`).
-//! - `GET /v2/currencies` → a JSON array of `{iso_code, iso_numeric, name,
-//!   symbol, …}`. [`fetch_currencies`] returns the rows as-is; reducing them to
-//!   what our schema accepts is `fx_sync`'s concern (it applies the domain
-//!   validators).
+//! - `GET /v2/rates?base=<code>` — [`fetch_rates`], the latest rates for a base.
+//! - `GET /v2/rates?base=<code>&from=<d>&to=<d>` — [`fetch_rates_on`], a base's
+//!   rates as of a single past date (Frankfurter carries weekends/holidays
+//!   forward, so the served date may precede `<d>`).
+//! - `GET /v2/currencies` — [`fetch_currencies`], returned as-is; reducing rows
+//!   to what our schema accepts is `fx_sync`'s concern.
+//!
+//! Every rate is parsed straight from the response text into a [`BigDecimal`],
+//! never through `f64`.
 
 use std::str::FromStr;
 use std::time::Duration;
@@ -23,7 +23,8 @@ use bigdecimal::{BigDecimal, Signed};
 use leptos::logging;
 use sqlx::types::chrono::{DateTime, NaiveDate, Utc};
 
-/// `rate_source` tag stored on every `asset_rates` row sourced from Frankfurter.
+/// Provenance tag identifying a Frankfurter-sourced rate. Retained for any code
+/// that records where a rate came from (exchange rates are no longer persisted).
 pub const RATE_SOURCE: &str = "frankfurter.dev";
 
 /// The Frankfurter API host used unless `FRANKFURTER_URL` overrides it.
@@ -49,8 +50,8 @@ pub fn api_root() -> String {
 }
 
 /// Why a Frankfurter request could not be completed. The messages are safe to
-/// surface; today the only callers are the background tasks, which log and retry
-/// on the next tick.
+/// surface; a rate lookup maps this to `RateResolutionError::Unavailable` and
+/// the currency sync logs and retries on its next tick.
 #[derive(Debug, thiserror::Error)]
 pub enum FrankfurterError {
     #[error("could not reach the exchange-rate source")]
@@ -110,7 +111,26 @@ pub async fn fetch_rates(
     client: &reqwest::Client,
     base_code: &str,
 ) -> Result<Vec<ReferenceRate>, FrankfurterError> {
-    let body = fetch_rates_body(client, &api_root(), base_code).await?;
+    let url = format!("{}/v2/rates?base={base_code}", api_root());
+    let body = fetch_body(client, &url).await?;
+    parse_payload(&body, base_code)
+}
+
+/// Fetch and validate one base currency's rates as of a single past date:
+/// `GET {api_root()}/v2/rates?base={base_code}&from={date}&to={date}`. Frankfurter
+/// carries weekends and holidays forward server-side, so the rows come back dated
+/// on the most recent trading day on or before `date`, never simply missing.
+pub async fn fetch_rates_on(
+    client: &reqwest::Client,
+    base_code: &str,
+    date: NaiveDate,
+) -> Result<Vec<ReferenceRate>, FrankfurterError> {
+    let day = date.format("%Y-%m-%d");
+    let url = format!(
+        "{}/v2/rates?base={base_code}&from={day}&to={day}",
+        api_root()
+    );
+    let body = fetch_body(client, &url).await?;
     parse_payload(&body, base_code)
 }
 
@@ -132,17 +152,12 @@ pub async fn fetch_currencies(
         .map_err(|_| FrankfurterError::Parse("could not parse the currency list response"))
 }
 
-/// `GET {root}/v2/rates?base={code}` as text, retrying a timeout or 5xx.
-async fn fetch_rates_body(
-    client: &reqwest::Client,
-    root: &str,
-    code: &str,
-) -> Result<String, FrankfurterError> {
-    let url = format!("{root}/v2/rates?base={code}");
+/// `GET {url}` as text, retrying a timeout or 5xx a few times with backoff.
+async fn fetch_body(client: &reqwest::Client, url: &str) -> Result<String, FrankfurterError> {
     let mut attempt = 0;
     loop {
         match client
-            .get(url.as_str())
+            .get(url)
             .send()
             .await
             .and_then(reqwest::Response::error_for_status)
@@ -152,7 +167,7 @@ async fn fetch_rates_body(
                 let retryable =
                     err.is_timeout() || err.status().is_some_and(|status| status.is_server_error());
                 if retryable && attempt < FETCH_RETRY_BACKOFF.len() {
-                    logging::error!("frankfurter: base {code}: {err}; retrying");
+                    logging::error!("frankfurter: {url}: {err}; retrying");
                     tokio::time::sleep(FETCH_RETRY_BACKOFF[attempt]).await;
                     attempt += 1;
                     continue;

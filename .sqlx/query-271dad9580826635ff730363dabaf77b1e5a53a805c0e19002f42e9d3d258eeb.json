@@ -1,0 +1,76 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            a.id AS \"id!\",\n            a.deleted_at,\n            a.asset_name AS \"asset_name!\",\n            a.symbol,\n            f.numeric_code\n        FROM assets AS a\n        LEFT JOIN fiat_assets AS f ON f.asset_id = a.id\n        WHERE a.asset_class = 'fiat' AND a.code = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "assets",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "deleted_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "assets",
+            "name": "deleted_at"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "asset_name!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "assets",
+            "name": "asset_name"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "symbol",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "assets",
+            "name": "symbol"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "numeric_code",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "fiat_assets",
+            "name": "numeric_code"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "271dad9580826635ff730363dabaf77b1e5a53a805c0e19002f42e9d3d258eeb"
+}

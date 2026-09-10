@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            asset_id AS \"asset_id!\",\n            balance AS \"balance!\"\n        FROM account_balances\n        WHERE user_id = $1 AND account_id = $2\n        ",
+  "query": "\n        SELECT\n            ab.asset_id AS \"asset_id!\",\n            a.code AS \"alphabetic_code!\",\n            ab.balance AS \"balance!\"\n        FROM account_balances AS ab\n        INNER JOIN assets AS a ON a.id = ab.asset_id\n        WHERE ab.user_id = $1 AND ab.account_id = $2\n        ",
   "describe": {
     "columns": [
       {
@@ -16,6 +16,17 @@
       },
       {
         "ordinal": 1,
+        "name": "alphabetic_code!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "assets",
+            "name": "code"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
         "name": "balance!",
         "type_info": "Numeric",
         "origin": {
@@ -34,8 +45,9 @@
     },
     "nullable": [
       true,
+      false,
       true
     ]
   },
-  "hash": "fd9a33675a685c85ba21c53da16e53124a425fd458dc9efe5d4da9758de9274d"
+  "hash": "6f61c2b958e1d5737e2992d52f48cb42cedb9f3c47f42120d990e326cc3dca8b"
 }

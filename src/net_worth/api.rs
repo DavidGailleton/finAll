@@ -18,17 +18,21 @@ use crate::net_worth::types::NetWorthReportDto;
 /// `false` and `total` excludes it.
 #[server]
 pub async fn net_worth(display_currency_code: String) -> Result<NetWorthReportDto, ServerFnError> {
+    use std::sync::Arc;
+
     use crate::net_worth::types::NetWorthLineDto;
+    use crate::server::assets::fx_cache::FxRateCache;
     use crate::server::auth::extract;
     use crate::server::net_worth::{self, NetWorthError};
 
     let pool = expect_context::<sqlx::PgPool>();
+    let cache = expect_context::<Arc<FxRateCache>>();
 
     let user = extract::current_user(&pool)
         .await?
         .ok_or(NetWorthError::Unauthorized)?;
 
-    let report = net_worth::report(&pool, user.user_id, &display_currency_code).await?;
+    let report = net_worth::report(&pool, &cache, user.user_id, &display_currency_code).await?;
 
     Ok(NetWorthReportDto {
         display_currency_code: report.display.alphabetic_code,

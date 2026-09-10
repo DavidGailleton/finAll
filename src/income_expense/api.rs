@@ -23,18 +23,29 @@ pub async fn income_expense_report(
     from: String,
     to: String,
 ) -> Result<IncomeExpenseReportDto, ServerFnError> {
+    use std::sync::Arc;
+
     use crate::income_expense::types::{IncomeExpenseCurrencyDto, IncomeExpenseLineDto};
+    use crate::server::assets::fx_cache::FxRateCache;
     use crate::server::auth::extract;
     use crate::server::income_expense::{self, GroupLine, IncomeExpenseError};
 
     let pool = expect_context::<sqlx::PgPool>();
+    let cache = expect_context::<Arc<FxRateCache>>();
 
     let user = extract::current_user(&pool)
         .await?
         .ok_or(IncomeExpenseError::Unauthorized)?;
 
-    let report =
-        income_expense::report(&pool, user.user_id, &display_currency_code, &from, &to).await?;
+    let report = income_expense::report(
+        &pool,
+        &cache,
+        user.user_id,
+        &display_currency_code,
+        &from,
+        &to,
+    )
+    .await?;
 
     fn to_line(group: GroupLine) -> IncomeExpenseLineDto {
         IncomeExpenseLineDto {
