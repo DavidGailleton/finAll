@@ -6,4 +6,5 @@
 pub mod conversion;
 pub mod currency;
 pub mod rates;
+pub mod schedule;
 pub mod validate;

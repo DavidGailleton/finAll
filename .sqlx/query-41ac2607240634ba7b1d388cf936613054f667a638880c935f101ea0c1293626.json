@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                UPDATE assets\n                SET asset_name = $2, symbol = $3, updated_at = now()\n                WHERE id = $1\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "41ac2607240634ba7b1d388cf936613054f667a638880c935f101ea0c1293626"
+}

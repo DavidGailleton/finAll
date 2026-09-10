@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, code\n        FROM assets\n        WHERE asset_class = 'fiat'\n          AND is_active = TRUE\n          AND deleted_at IS NULL\n          AND code = ANY($1)\n        ",
+  "query": "\n        SELECT a.id, a.code\n        FROM assets AS a\n        WHERE a.asset_class = 'fiat'\n          AND a.is_active = TRUE\n          AND a.deleted_at IS NULL\n          AND (\n              a.code = $1\n              OR a.id IN (\n                  SELECT default_asset_id FROM accounts WHERE deleted_at IS NULL\n                  UNION\n                  SELECT asset_id FROM transactions WHERE deleted_at IS NULL\n              )\n          )\n        ORDER BY a.code\n        ",
   "describe": {
     "columns": [
       {
@@ -28,7 +28,7 @@
     ],
     "parameters": {
       "Left": [
-        "TextArray"
+        "Text"
       ]
     },
     "nullable": [
@@ -36,5 +36,5 @@
       false
     ]
   },
-  "hash": "0202bb3e7d38165161c7bdffd1ec401ed2484271b2dbed30483c28407fe60bf1"
+  "hash": "9afcd27d06d71f9dbe8803e336687fda5358a2225444cd03bf7e02a3322afecc"
 }

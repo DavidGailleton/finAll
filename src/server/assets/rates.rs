@@ -1,13 +1,13 @@
-//! Opt-in ingestion of euro reference rates from `frankfurter.dev` (v2 API).
+//! Opt-in ingestion of reference rates from Frankfurter (`api.frankfurter.dev`,
+//! v2 API; override the host with `FRANKFURTER_URL`).
 //!
-//! [`fetch_and_store`] is the single entry point, called on an interval by the
-//! background task in `main.rs` only when `FETCH_FX_RATES` is set. It fetches the
-//! latest rates with `EUR` as the base and writes one `asset_rates` row per
-//! currency it can resolve to an active fiat asset: `base_asset_id` is the `EUR`
-//! asset, `quote_asset_id` is the other currency, `rate` is the exact value
-//! Frankfurter returned (parsed straight from the response text into a
-//! [`BigDecimal`], never through `f64`). The v2 API covers the European Central
-//! Bank reference currencies plus a wider set of others.
+//! [`ingest`] is the single entry point, called daily by the background task in
+//! `main.rs` when `FETCH_FX_RATES` is set. For every currency the user actually
+//! holds (plus `EUR`) it fetches `GET /v2/rates?base=<code>` and writes one
+//! `asset_rates` row per quote currency it can resolve to an active fiat asset:
+//! `base_asset_id` is that base currency, `quote_asset_id` the other, `rate` the
+//! exact value Frankfurter returned (parsed straight from the response text into
+//! a [`BigDecimal`], never through `f64`).
 //!
 //! `observed_at` is a rate's reference *date* at `00:00:00Z` — a date, not a
 //! wall-clock publication instant. The v2 API returns each currency's latest
@@ -17,9 +17,10 @@
 //! observed_at)` already holds the row and the insert is `ON CONFLICT DO
 //! NOTHING`, so a stored observation is never mutated.
 //!
-//! Cross-rates and reciprocals (anything not `EUR -> X`) are intentionally not
-//! derived or stored here; a conversion needs an explicit rounding policy that
-//! the caller supplies (see [`crate::server::assets::conversion`]).
+//! Rates are only ever stored as Frankfurter quotes them (`base -> quote`);
+//! cross-rates and reciprocals are derived at read time by [`resolve_rate`],
+//! never precomputed here, because a conversion needs an explicit rounding
+//! policy the caller supplies (see [`crate::server::assets::conversion`]).
 
 use std::collections::HashMap;
 use std::num::NonZeroU64;
@@ -34,12 +35,35 @@ use sqlx::PgPool;
 
 /// `rate_source` tag stored on every row this module writes.
 const RATE_SOURCE: &str = "frankfurter.dev";
-/// Latest reference rates, quoted against the euro (Frankfurter v2 API).
-const LATEST_URL: &str = "https://api.frankfurter.dev/v2/rates?base=EUR";
-/// The base currency this module ingests against.
+/// The Frankfurter API host used unless `FRANKFURTER_URL` overrides it.
+const DEFAULT_API_ROOT: &str = "https://api.frankfurter.dev";
+/// The currency always fetched as a base, in addition to the ones in use: it is
+/// the read-time cross-rate pivot ([`pivot_asset_id`]) and the historical anchor.
 const BASE_CODE: &str = "EUR";
+
+/// The Frankfurter API root (no trailing slash): `FRANKFURTER_URL` when set and
+/// non-blank — point it at a self-hosted instance or mirror serving the same v2
+/// `/v2/rates` and `/v2/currencies` shapes — otherwise [`DEFAULT_API_ROOT`].
+/// Shared with [`crate::server::assets::currency`]'s currency sync.
+pub fn api_root() -> String {
+    let root = std::env::var("FRANKFURTER_URL")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_API_ROOT.to_owned());
+    root.trim_end_matches('/').to_owned()
+}
+
 /// Upper bound on a single fetch; a slow or hanging source must not wedge the task.
-const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+pub const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Delay between successive per-base fetches, so a run of several bases does not
+/// hammer the source.
+const BASE_FETCH_SPACING: Duration = Duration::from_millis(300);
+
+/// Backoff before each retry of one base's fetch (a timeout or 5xx); its length
+/// is the retry count, so a base gets `1 + len` attempts before it is skipped.
+const FETCH_RETRY_BACKOFF: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(4)];
 
 /// Why an ingestion run could not complete.
 ///
@@ -82,71 +106,179 @@ struct RateRow {
     rate: Box<serde_json::value::RawValue>,
 }
 
-/// A validated rate: the reference date (at `00:00:00Z`), the quote currency
-/// code, and an exact positive `EUR -> quote_code` rate.
+/// A validated rate row: its reference date (at `00:00:00Z`), the quote currency
+/// code, and an exact positive `base -> quote` rate. The base is tracked by the
+/// caller — [`ingest`] fetches one base at a time.
 struct ReferenceRate {
     observed_at: DateTime<Utc>,
     quote_code: String,
     rate: BigDecimal,
 }
 
-/// Fetch the latest EUR-based reference rates and store the ones that resolve to
-/// an active fiat asset. Returns the number of rows actually inserted (rows that
-/// already existed for their reference date are not counted).
-pub async fn fetch_and_store(pool: &PgPool) -> Result<u64, RatesError> {
-    let client = reqwest::Client::builder().timeout(HTTP_TIMEOUT).build()?;
-    let body = client
-        .get(LATEST_URL)
-        .send()
-        .await?
-        .error_for_status()?
-        .text()
-        .await?;
+/// What one [`ingest`] run did, for the log line.
+pub struct IngestSummary {
+    /// Rows newly written to `asset_rates` (an observation that already existed
+    /// counts zero).
+    pub inserted: u64,
+    /// Base currencies whose fetch and store both completed.
+    pub bases_ok: usize,
+    /// Base currencies skipped this run after their fetch kept failing.
+    pub bases_failed: usize,
+}
 
-    let rates = parse_payload(&body)?;
-
-    let mut wanted: Vec<String> = Vec::with_capacity(rates.len() + 1);
-    wanted.push(BASE_CODE.to_owned());
-    wanted.extend(rates.iter().map(|rate| rate.quote_code.clone()));
-
-    let assets = sqlx::query!(
+/// Fetch the latest rates for every currency the user holds (plus `EUR`) as the
+/// base, and store the ones that resolve to an active fiat asset.
+///
+/// Each base is fetched and stored on its own: a base whose fetch keeps failing
+/// is logged and skipped without aborting the others, and each base's rows are
+/// one all-or-nothing transaction. Idempotent via `ON CONFLICT DO NOTHING`.
+/// Returns [`RatesError`] only for a database failure that stops the run before
+/// it starts.
+pub async fn ingest(pool: &PgPool) -> Result<IngestSummary, RatesError> {
+    let bases = sqlx::query!(
         r#"
-        SELECT id, code
-        FROM assets
-        WHERE asset_class = 'fiat'
-          AND is_active = TRUE
-          AND deleted_at IS NULL
-          AND code = ANY($1)
+        SELECT a.id, a.code
+        FROM assets AS a
+        WHERE a.asset_class = 'fiat'
+          AND a.is_active = TRUE
+          AND a.deleted_at IS NULL
+          AND (
+              a.code = $1
+              OR a.id IN (
+                  SELECT default_asset_id FROM accounts WHERE deleted_at IS NULL
+                  UNION
+                  SELECT asset_id FROM transactions WHERE deleted_at IS NULL
+              )
+          )
+        ORDER BY a.code
         "#,
-        &wanted,
+        BASE_CODE,
     )
     .fetch_all(pool)
     .await?;
 
-    let ids: HashMap<String, Uuid> = assets.into_iter().map(|row| (row.code, row.id)).collect();
+    if bases.is_empty() {
+        logging::log!("fx rates: no active base currency; skipping run");
+        return Ok(IngestSummary {
+            inserted: 0,
+            bases_ok: 0,
+            bases_failed: 0,
+        });
+    }
 
-    let Some(&base_id) = ids.get(BASE_CODE) else {
-        logging::log!("fx rates: no active {BASE_CODE} asset; skipping run");
-        return Ok(0);
+    // Any active fiat asset can be the quote side of a stored rate.
+    let quote_assets = sqlx::query!(
+        r#"
+        SELECT id, code
+        FROM assets
+        WHERE asset_class = 'fiat' AND is_active = TRUE AND deleted_at IS NULL
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    let ids: HashMap<String, Uuid> = quote_assets
+        .into_iter()
+        .map(|row| (row.code, row.id))
+        .collect();
+
+    let client = reqwest::Client::builder().timeout(HTTP_TIMEOUT).build()?;
+    let root = api_root();
+
+    let mut summary = IngestSummary {
+        inserted: 0,
+        bases_ok: 0,
+        bases_failed: 0,
     };
+    for (index, base) in bases.iter().enumerate() {
+        if index > 0 {
+            tokio::time::sleep(BASE_FETCH_SPACING).await;
+        }
 
-    // One fetch is stored as a single all-or-nothing batch: a mid-run failure
-    // rolls the whole run back, and the next tick retries it (still idempotent
-    // through the `ON CONFLICT DO NOTHING`).
+        let rates = match fetch_base(&client, &root, &base.code).await {
+            Ok(body) => match parse_payload(&body, &base.code) {
+                Ok(rates) => rates,
+                Err(err) => {
+                    logging::error!("fx rates: base {}: {err}", base.code);
+                    summary.bases_failed += 1;
+                    continue;
+                }
+            },
+            Err(_) => {
+                logging::error!("fx rates: base {} unreachable this run", base.code);
+                summary.bases_failed += 1;
+                continue;
+            }
+        };
+
+        match store_base(pool, base.id, &rates, &ids).await {
+            Ok(inserted) => {
+                summary.inserted += inserted;
+                summary.bases_ok += 1;
+            }
+            Err(err) => {
+                logging::error!("fx rates: base {}: {err}", base.code);
+                summary.bases_failed += 1;
+            }
+        }
+    }
+
+    Ok(summary)
+}
+
+/// `GET {root}/v2/rates?base={code}`, retrying a timeout or 5xx a few times with
+/// backoff before giving up on this base for the run.
+async fn fetch_base(
+    client: &reqwest::Client,
+    root: &str,
+    code: &str,
+) -> Result<String, RatesError> {
+    let url = format!("{root}/v2/rates?base={code}");
+    let mut attempt = 0;
+    loop {
+        match client
+            .get(url.as_str())
+            .send()
+            .await
+            .and_then(reqwest::Response::error_for_status)
+        {
+            Ok(response) => return Ok(response.text().await?),
+            Err(err) => {
+                let retryable =
+                    err.is_timeout() || err.status().is_some_and(|status| status.is_server_error());
+                if retryable && attempt < FETCH_RETRY_BACKOFF.len() {
+                    logging::error!("fx rates: base {code}: {err}; retrying");
+                    tokio::time::sleep(FETCH_RETRY_BACKOFF[attempt]).await;
+                    attempt += 1;
+                    continue;
+                }
+                return Err(err.into());
+            }
+        }
+    }
+}
+
+/// Store one base's parsed rates in a single transaction; returns rows inserted.
+async fn store_base(
+    pool: &PgPool,
+    base_id: Uuid,
+    rates: &[ReferenceRate],
+    ids: &HashMap<String, Uuid>,
+) -> Result<u64, RatesError> {
     let mut tx = pool.begin().await?;
 
     let mut inserted = 0_u64;
-    let mut skipped = 0_usize;
     for ReferenceRate {
         observed_at,
         quote_code,
         rate,
-    } in &rates
+    } in rates
     {
         let Some(&quote_id) = ids.get(quote_code) else {
-            skipped += 1;
             continue;
         };
+        if quote_id == base_id {
+            continue;
+        }
 
         let result = sqlx::query!(
             r#"
@@ -169,21 +301,16 @@ pub async fn fetch_and_store(pool: &PgPool) -> Result<u64, RatesError> {
     }
 
     tx.commit().await?;
-
-    if skipped > 0 {
-        logging::log!("fx rates: skipped {skipped} currency code(s) with no active fiat asset");
-    }
-
     Ok(inserted)
 }
 
 /// Parse a Frankfurter v2 `/v2/rates` response body into validated rates. Every
-/// row must be `EUR`-based with a valid date and a positive decimal rate
-/// (mirroring the `asset_rates_rate_positive` check); the rates arrive as one
-/// block, so a single bad value fails the whole run rather than being silently
-/// dropped. A row quoting `EUR` against itself is skipped (it would violate
-/// `asset_rates_distinct_assets`).
-fn parse_payload(body: &str) -> Result<Vec<ReferenceRate>, RatesError> {
+/// row must carry `expected_base` as its base, a valid date, and a positive
+/// decimal rate (mirroring the `asset_rates_rate_positive` check); the rates
+/// arrive as one block, so a single bad value fails this base's run rather than
+/// being silently dropped. A row quoting the base against itself is skipped (it
+/// would violate `asset_rates_distinct_assets`).
+fn parse_payload(body: &str, expected_base: &str) -> Result<Vec<ReferenceRate>, RatesError> {
     let rows: Vec<RateRow> = serde_json::from_str(body)
         .map_err(|_| RatesError::Parse("could not parse the exchange-rate response"))?;
 
@@ -195,12 +322,12 @@ fn parse_payload(body: &str) -> Result<Vec<ReferenceRate>, RatesError> {
 
     let mut rates = Vec::with_capacity(rows.len());
     for row in rows {
-        if row.base != BASE_CODE {
+        if row.base != expected_base {
             return Err(RatesError::Parse(
                 "exchange-rate response had an unexpected base currency",
             ));
         }
-        if row.quote == BASE_CODE {
+        if row.quote == row.base {
             continue;
         }
 
@@ -587,14 +714,14 @@ mod tests {
 
     #[test]
     fn parses_each_row_reference_date_as_midnight_utc() {
-        let rates = parse_payload(SAMPLE).expect("sample parses");
+        let rates = parse_payload(SAMPLE, "EUR").expect("sample parses");
         assert_eq!(find(&rates, "USD").observed_at, midnight_utc(2024, 6, 14));
         assert_eq!(find(&rates, "JPY").observed_at, midnight_utc(2024, 6, 13));
     }
 
     #[test]
     fn parses_rates_without_a_float_round_trip() {
-        let rates = parse_payload(SAMPLE).expect("sample parses");
+        let rates = parse_payload(SAMPLE, "EUR").expect("sample parses");
         assert_eq!(rates.len(), 3);
         assert_eq!(
             find(&rates, "USD").rate,
@@ -610,7 +737,7 @@ mod tests {
     fn preserves_a_high_precision_rate() {
         let body = r#"[{"date":"2024-06-14","base":"EUR","quote":"USD",
             "rate":1.234567890123456789}]"#;
-        let rates = parse_payload(body).expect("body parses");
+        let rates = parse_payload(body, "EUR").expect("body parses");
         assert_eq!(
             find(&rates, "USD").rate,
             BigDecimal::from_str("1.234567890123456789").unwrap()
@@ -620,7 +747,7 @@ mod tests {
     #[test]
     fn parses_an_integer_rate() {
         let body = r#"[{"date":"2024-06-14","base":"EUR","quote":"AOA","rate":818976}]"#;
-        let rates = parse_payload(body).expect("body parses");
+        let rates = parse_payload(body, "EUR").expect("body parses");
         assert_eq!(
             find(&rates, "AOA").rate,
             BigDecimal::from_str("818976").unwrap()
@@ -628,9 +755,24 @@ mod tests {
     }
 
     #[test]
-    fn skips_a_euro_self_quote() {
+    fn accepts_any_base_as_long_as_it_is_the_one_requested() {
+        let body = r#"[
+            {"date":"2024-06-14","base":"USD","quote":"EUR","rate":0.93},
+            {"date":"2024-06-14","base":"USD","quote":"USD","rate":1.0}
+        ]"#;
+        let rates = parse_payload(body, "USD").expect("body parses");
+        // The USD self-quote is dropped; the EUR quote is kept.
+        assert_eq!(rates.len(), 1);
+        assert_eq!(
+            find(&rates, "EUR").rate,
+            BigDecimal::from_str("0.93").unwrap()
+        );
+    }
+
+    #[test]
+    fn skips_a_base_self_quote() {
         let body = r#"[{"date":"2024-06-14","base":"EUR","quote":"EUR","rate":1.0}]"#;
-        assert!(parse_payload(body).expect("body parses").is_empty());
+        assert!(parse_payload(body, "EUR").expect("body parses").is_empty());
     }
 
     #[test]
@@ -638,25 +780,37 @@ mod tests {
         for rate in ["0", "-1.5"] {
             let body =
                 format!(r#"[{{"date":"2024-06-14","base":"EUR","quote":"USD","rate":{rate}}}]"#);
-            assert!(matches!(parse_payload(&body), Err(RatesError::Parse(_))));
+            assert!(matches!(
+                parse_payload(&body, "EUR"),
+                Err(RatesError::Parse(_))
+            ));
         }
     }
 
     #[test]
-    fn rejects_an_unexpected_base_currency() {
+    fn rejects_a_base_other_than_the_one_requested() {
         let body = r#"[{"date":"2024-06-14","base":"USD","quote":"EUR","rate":0.93}]"#;
-        assert!(matches!(parse_payload(body), Err(RatesError::Parse(_))));
+        assert!(matches!(
+            parse_payload(body, "EUR"),
+            Err(RatesError::Parse(_))
+        ));
     }
 
     #[test]
     fn rejects_an_invalid_reference_date() {
         let body = r#"[{"date":"not-a-date","base":"EUR","quote":"USD","rate":1.07}]"#;
-        assert!(matches!(parse_payload(body), Err(RatesError::Parse(_))));
+        assert!(matches!(
+            parse_payload(body, "EUR"),
+            Err(RatesError::Parse(_))
+        ));
     }
 
     #[test]
     fn rejects_an_empty_response() {
-        assert!(matches!(parse_payload("[]"), Err(RatesError::Parse(_))));
+        assert!(matches!(
+            parse_payload("[]", "EUR"),
+            Err(RatesError::Parse(_))
+        ));
     }
 }
 

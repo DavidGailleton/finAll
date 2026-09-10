@@ -50,30 +50,58 @@ async fn main() {
         }
     });
 
-    // Poll frankfurter.dev for ECB euro reference rates only when explicitly
-    // opted in with `FETCH_FX_RATES=1` (or `true`). Off by default; manual rate
-    // entry is the primary path. Stores EUR-based rows in `asset_rates`.
+    // Pull currencies and exchange rates from Frankfurter only when explicitly
+    // opted in with `FETCH_FX_RATES=1` (or `true`). Off by default; manual entry
+    // is the primary path. Both jobs run once at startup (catching up a missed
+    // boundary) and are idempotent.
     let fetch_fx_rates = std::env::var("FETCH_FX_RATES")
         .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true"))
         .unwrap_or(false);
     if fetch_fx_rates {
+        use fin_all::server::assets::{currency, rates, schedule};
+        use sqlx::types::chrono::Utc;
+
+        // Daily at 00:00 UTC: rates for every currency in use (plus EUR).
         tokio::spawn({
             let pool = pool.clone();
             async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_secs(60 * 60));
                 loop {
-                    interval.tick().await;
-                    match fin_all::server::assets::rates::fetch_and_store(&pool).await {
-                        Ok(count) if count > 0 => {
-                            log!("fx rates: stored {count} EUR-based rate(s) from frankfurter")
-                        }
+                    match rates::ingest(&pool).await {
+                        Ok(summary) if summary.inserted > 0 => log!(
+                            "fx rates: stored {} rate(s) from {} base(s), {} failed",
+                            summary.inserted,
+                            summary.bases_ok,
+                            summary.bases_failed,
+                        ),
                         Ok(_) => {}
-                        Err(_) => log!("fx rates: fetch failed"),
+                        Err(_) => log!("fx rates: run failed"),
                     }
+                    tokio::time::sleep(schedule::duration_until_next_utc_midnight(Utc::now()))
+                        .await;
                 }
             }
         });
-        log!("fx rates: frankfurter polling enabled");
+
+        // Monthly on the 1st at 00:00 UTC: refresh the currency list.
+        tokio::spawn({
+            let pool = pool.clone();
+            async move {
+                loop {
+                    match currency::sync_from_frankfurter(&pool).await {
+                        Ok(summary) => log!(
+                            "currencies: {} new, {} refreshed, {} skipped",
+                            summary.inserted,
+                            summary.updated,
+                            summary.skipped,
+                        ),
+                        Err(_) => log!("currencies: sync failed"),
+                    }
+                    tokio::time::sleep(schedule::duration_until_next_month_start(Utc::now())).await;
+                }
+            }
+        });
+
+        log!("frankfurter: daily rates + monthly currency sync enabled");
     }
 
     let app = Router::new()

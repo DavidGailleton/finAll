@@ -39,6 +39,7 @@ services:
       RUST_LOG: ${RUST_LOG:-info}
       RUN_MIGRATIONS: ${RUN_MIGRATIONS:-0}
       FETCH_FX_RATES: ${FETCH_FX_RATES:-0}
+      FRANKFURTER_URL: ${FRANKFURTER_URL:-}
     depends_on:
       db:
         condition: service_healthy

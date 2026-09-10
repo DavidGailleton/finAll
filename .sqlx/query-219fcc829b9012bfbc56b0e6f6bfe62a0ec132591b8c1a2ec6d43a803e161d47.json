@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO fiat_assets (asset_id, numeric_code)\n        VALUES ($1, $2)\n        ON CONFLICT (asset_id) DO UPDATE\n        SET numeric_code = EXCLUDED.numeric_code\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "219fcc829b9012bfbc56b0e6f6bfe62a0ec132591b8c1a2ec6d43a803e161d47"
+}
