@@ -58,7 +58,7 @@ async fn main() {
         .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true"))
         .unwrap_or(false);
     if fetch_fx_rates {
-        use fin_all::server::assets::{currency, rates, schedule};
+        use fin_all::server::assets::{fx_sync, schedule};
         use sqlx::types::chrono::Utc;
 
         // Daily at 00:00 UTC: rates for every currency in use (plus EUR).
@@ -66,7 +66,7 @@ async fn main() {
             let pool = pool.clone();
             async move {
                 loop {
-                    match rates::ingest(&pool).await {
+                    match fx_sync::sync_rates(&pool).await {
                         Ok(summary) if summary.inserted > 0 => log!(
                             "fx rates: stored {} rate(s) from {} base(s), {} failed",
                             summary.inserted,
@@ -87,7 +87,7 @@ async fn main() {
             let pool = pool.clone();
             async move {
                 loop {
-                    match currency::sync_from_frankfurter(&pool).await {
+                    match fx_sync::sync_currencies(&pool).await {
                         Ok(summary) => log!(
                             "currencies: {} new, {} refreshed, {} skipped",
                             summary.inserted,
