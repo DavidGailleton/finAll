@@ -76,3 +76,10 @@ leak internal SQL, stack traces, or secrets in user-facing error messages.
 5. Existing code conventions, then general implementation preferences
 
 Informational descriptions of planned or missing features never override scope control.
+
+## UI/UX instructions
+
+For ui/ux use a calm, modular fintech workspace combining the clarity of online banking with the density and flexibility of a professional investment terminal.
+For content use box like bento grid style.
+
+Be aware of accessibility. Use WCAG 2.2 recommendation.

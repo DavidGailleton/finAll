@@ -6,6 +6,7 @@
 //! [`crate::pages::ledger`] table.
 
 use leptos::prelude::*;
+use leptos_meta::Title;
 use leptos_router::components::A;
 use leptos_router::hooks::{use_navigate, use_params_map};
 
@@ -15,7 +16,9 @@ use crate::accounts::api::{
 use crate::accounts::types::AccountType;
 use crate::assets::currency::api::list_currencies;
 use crate::balances::api::account_balance;
-use crate::components::{Button, FormError, Layout, SelectField, TextField};
+use crate::components::{
+    Button, FormError, Layout, Money, PageHeader, Panel, SelectField, TextField,
+};
 use crate::pages::guard::RequireAuth;
 use crate::pages::ledger::{
     AccountContext, AddTransactionForm, AddTransferForm, LedgerActions, LedgerFilter, LedgerTable,
@@ -26,8 +29,13 @@ use crate::pages::server_error_message;
 #[component]
 pub fn AccountsPage() -> impl IntoView {
     view! {
+        <Title text="Accounts · finAll" />
         <RequireAuth>
             <Layout>
+                <PageHeader
+                    title="Accounts"
+                    description="Every account you track, cash to crypto."
+                />
                 <AccountsList />
             </Layout>
         </RequireAuth>
@@ -39,53 +47,63 @@ fn AccountsList() -> impl IntoView {
     let accounts = Resource::new(|| (), |_| async move { list_accounts().await });
 
     view! {
-        <h1>"Accounts"</h1>
-        <Suspense fallback=|| view! { <p class="loading">"Loading accounts…"</p> }>
-            {move || {
-                accounts
-                    .get()
-                    .map(|result| match result {
-                        Err(err) => {
-                            view! {
-                                <p class="form-error" role="alert">
-                                    {server_error_message(&err)}
-                                </p>
+        <div class="bento">
+            <Suspense fallback=|| {
+                view! {
+                    <Panel>
+                        <p class="loading">"Loading accounts…"</p>
+                    </Panel>
+                }
+            }>
+                {move || {
+                    accounts
+                        .get()
+                        .map(|result| match result {
+                            Err(err) => {
+                                view! {
+                                    <Panel>
+                                        <p class="form-error">{server_error_message(&err)}</p>
+                                    </Panel>
+                                }
+                                    .into_any()
                             }
-                                .into_any()
-                        }
-                        Ok(list) if list.is_empty() => {
-                            view! {
-                                <p class="empty-state">"You don't have any accounts yet."</p>
+                            Ok(list) if list.is_empty() => {
+                                view! {
+                                    <Panel>
+                                        <p class="empty-state">
+                                            <strong>"No accounts yet"</strong>
+                                            "Add your first account to start tracking balances and transactions."
+                                        </p>
+                                    </Panel>
+                                }
+                                    .into_any()
                             }
-                                .into_any()
-                        }
-                        Ok(list) => {
-                            view! {
-                                <ul class="accounts-list">
-                                    {list
-                                        .into_iter()
-                                        .map(|account| {
-                                            view! {
-                                                <li class="account-row">
-                                                    <A href=format!(
-                                                        "/accounts/{}",
-                                                        account.id,
-                                                    )>{account.account_name}</A>
-                                                    <span class="account-type">
-                                                        {account.account_type.label()}
-                                                    </span>
-                                                </li>
-                                            }
-                                        })
-                                        .collect_view()}
-                                </ul>
+                            Ok(list) => {
+                                list.into_iter()
+                                    .map(|account| {
+                                        view! {
+                                            <Panel span=4>
+                                                <h2 class="panel__title">
+                                                    <A href=format!("/accounts/{}", account.id)>
+                                                        {account.account_name}
+                                                    </A>
+                                                </h2>
+                                                <span class="badge">
+                                                    {account.account_type.label()}
+                                                </span>
+                                            </Panel>
+                                        }
+                                    })
+                                    .collect_view()
+                                    .into_any()
                             }
-                                .into_any()
-                        }
-                    })
-            }}
-        </Suspense>
-        <AddAccountForm />
+                        })
+                }}
+            </Suspense>
+            <Panel title="Add account" span=4>
+                <AddAccountForm />
+            </Panel>
+        </div>
     }
 }
 
@@ -120,89 +138,90 @@ fn AddAccountForm() -> impl IntoView {
     );
 
     view! {
-        <div class="add-account">
-            <Show
-                when=move || adding.get()
-                fallback=move || {
-                    view! {
-                        <button type="button" class="btn" on:click=move |_| adding.set(true)>
-                            "Add account"
-                        </button>
-                    }
+        <Show
+            when=move || adding.get()
+            fallback=move || {
+                view! {
+                    <button
+                        type="button"
+                        class="btn btn--secondary"
+                        aria-expanded="false"
+                        on:click=move |_| adding.set(true)
+                    >
+                        "Add account"
+                    </button>
                 }
-            >
-                <Suspense fallback=|| {
-                    view! { <p class="loading">"Loading currencies…"</p> }
-                }>
-                    {move || {
-                        currencies
-                            .get()
-                            .map(|result| match result {
-                                Err(err) => {
-                                    view! {
-                                        <p class="form-error" role="alert">
-                                            {server_error_message(&err)}
-                                        </p>
-                                    }
-                                        .into_any()
-                                }
-                                Ok(currency_list) => {
-                                    view! {
-                                        <ActionForm action=create>
-                                            <TextField label="Name" name="account_name" />
-                                            <SelectField label="Type" name="account_type">
-                                                <option value="" disabled selected>
-                                                    "Select a type"
-                                                </option>
-                                                {AccountType::ALL
-                                                    .iter()
-                                                    .map(|account_type| {
-                                                        let account_type = *account_type;
-                                                        view! {
-                                                            <option value=account_type.as_db_str()>
-                                                                {account_type.label()}
-                                                            </option>
-                                                        }
-                                                    })
-                                                    .collect_view()}
-                                            </SelectField>
-                                            <SelectField label="Currency" name="default_asset_id">
-                                                <option value="" disabled selected>
-                                                    "Select a currency"
-                                                </option>
-                                                {currency_list
-                                                    .into_iter()
-                                                    .map(|currency| {
-                                                        view! {
-                                                            <option value=currency.id>
-                                                                {format!(
-                                                                    "{} — {}",
-                                                                    currency.alphabetic_code,
-                                                                    currency.currency_name,
-                                                                )}
-                                                            </option>
-                                                        }
-                                                    })
-                                                    .collect_view()}
-                                            </SelectField>
-                                            <FormError message=create_error />
+            }
+        >
+            <Suspense fallback=|| {
+                view! { <p class="loading">"Loading currencies…"</p> }
+            }>
+                {move || {
+                    currencies
+                        .get()
+                        .map(|result| match result {
+                            Err(err) => {
+                                view! { <p class="form-error">{server_error_message(&err)}</p> }
+                                    .into_any()
+                            }
+                            Ok(currency_list) => {
+                                view! {
+                                    <ActionForm action=create>
+                                        <TextField label="Name" name="account_name" />
+                                        <SelectField label="Type" name="account_type">
+                                            <option value="" disabled selected>
+                                                "Select a type"
+                                            </option>
+                                            {AccountType::ALL
+                                                .iter()
+                                                .map(|account_type| {
+                                                    let account_type = *account_type;
+                                                    view! {
+                                                        <option value=account_type.as_db_str()>
+                                                            {account_type.label()}
+                                                        </option>
+                                                    }
+                                                })
+                                                .collect_view()}
+                                        </SelectField>
+                                        <SelectField label="Currency" name="default_asset_id">
+                                            <option value="" disabled selected>
+                                                "Select a currency"
+                                            </option>
+                                            {currency_list
+                                                .into_iter()
+                                                .map(|currency| {
+                                                    view! {
+                                                        <option value=currency.id>
+                                                            {format!(
+                                                                "{} — {}",
+                                                                currency.alphabetic_code,
+                                                                currency.currency_name,
+                                                            )}
+                                                        </option>
+                                                    }
+                                                })
+                                                .collect_view()}
+                                        </SelectField>
+                                        <FormError message=create_error />
+                                        <div class="form-actions">
                                             <Button pending=create.pending()>"Create account"</Button>
                                             <button
                                                 type="button"
-                                                class="btn"
+                                                class="btn btn--secondary"
                                                 on:click=move |_| adding.set(false)
                                             >
                                                 "Cancel"
                                             </button>
-                                        </ActionForm>
-                                    }
-                                        .into_any()
+                                        </div>
+                                    </ActionForm>
                                 }
-                            })
-                    }}
-                </Suspense>
-            </Show>
-        </div>
+                                    .into_any()
+                            }
+                        })
+                }}
+            </Suspense>
+        </Show>
     }
 }
 
@@ -210,6 +229,7 @@ fn AddAccountForm() -> impl IntoView {
 #[component]
 pub fn AccountDetailPage() -> impl IntoView {
     view! {
+        <Title text="Account · finAll" />
         <RequireAuth>
             <Layout>
                 <AccountDetail />
@@ -275,20 +295,14 @@ fn AccountDetail() -> impl IntoView {
     });
 
     view! {
-        <p>
-            <A href="/accounts">"← Accounts"</A>
-        </p>
+        <A href="/accounts" attr:class="back-link">"Back to accounts"</A>
         <Suspense fallback=|| view! { <p class="loading">"Loading account…"</p> }>
             {move || {
                 account
                     .get()
                     .map(|result| match result {
                         Err(err) => {
-                            view! {
-                                <p class="form-error" role="alert">
-                                    {server_error_message(&err)}
-                                </p>
-                            }
+                            view! { <p class="form-error">{server_error_message(&err)}</p> }
                                 .into_any()
                         }
                         Ok(account) => {
@@ -297,85 +311,97 @@ fn AccountDetail() -> impl IntoView {
                             let transactions_default_asset_id = account.default_asset_id.clone();
                             let current_type = account.account_type;
                             view! {
-                                <h1>{account.account_name.clone()}</h1>
-                                <p class="account-type">{current_type.label()}</p>
+                                <Title text=format!("{} · finAll", account.account_name) />
+                                <PageHeader title=account.account_name.clone() />
+                                <div class="bento">
+                                    <Panel title="Balance" span=5 primary=true>
+                                        <span class="badge">{current_type.label()}</span>
+                                        <div aria-live="polite">
+                                            <Suspense fallback=|| {
+                                                view! { <p class="loading">"Loading balance…"</p> }
+                                            }>
+                                                {move || {
+                                                    balance
+                                                        .get()
+                                                        .map(|result| match result {
+                                                            Err(err) => {
+                                                                view! {
+                                                                    <p class="form-error">
+                                                                        {server_error_message(&err)}
+                                                                    </p>
+                                                                }
+                                                                    .into_any()
+                                                            }
+                                                            Ok(balance) => {
+                                                                view! {
+                                                                    <Money
+                                                                        amount=balance.amount
+                                                                        code=balance.currency_code
+                                                                        figure=true
+                                                                    />
+                                                                }
+                                                                    .into_any()
+                                                            }
+                                                        })
+                                                }}
+                                            </Suspense>
+                                        </div>
+                                    </Panel>
 
-                                <Suspense fallback=|| {
-                                    view! { <p class="loading">"Loading balance…"</p> }
-                                }>
-                                    {move || {
-                                        balance
-                                            .get()
-                                            .map(|result| match result {
-                                                Err(err) => {
-                                                    view! {
-                                                        <p class="form-error" role="alert">
-                                                            {server_error_message(&err)}
-                                                        </p>
-                                                    }
-                                                        .into_any()
-                                                }
-                                                Ok(balance) => {
-                                                    view! {
-                                                        <p class="net-worth-total">
-                                                            <strong>
-                                                                {format!(
-                                                                    "{} {}",
-                                                                    balance.amount,
-                                                                    balance.currency_code,
-                                                                )}
-                                                            </strong>
-                                                        </p>
-                                                    }
-                                                        .into_any()
-                                                }
-                                            })
-                                    }}
-                                </Suspense>
+                                    <Panel title="Settings" span=7>
+                                        <ActionForm action=edit>
+                                            <input
+                                                type="hidden"
+                                                name="id"
+                                                value=account.id.clone()
+                                            />
+                                            <input
+                                                type="hidden"
+                                                name="default_asset_id"
+                                                value=account.default_asset_id.clone()
+                                            />
+                                            <TextField
+                                                label="Name"
+                                                name="account_name"
+                                                value=account.account_name.clone()
+                                            />
+                                            <SelectField label="Type" name="account_type">
+                                                {AccountType::ALL
+                                                    .iter()
+                                                    .map(|account_type| {
+                                                        let account_type = *account_type;
+                                                        view! {
+                                                            <option
+                                                                value=account_type.as_db_str()
+                                                                selected=account_type == current_type
+                                                            >
+                                                                {account_type.label()}
+                                                            </option>
+                                                        }
+                                                    })
+                                                    .collect_view()}
+                                            </SelectField>
+                                            <FormError message=edit_error />
+                                            <Button pending=edit.pending()>"Save changes"</Button>
+                                        </ActionForm>
 
-                                <ActionForm action=edit>
-                                    <input type="hidden" name="id" value=account.id.clone() />
-                                    <input
-                                        type="hidden"
-                                        name="default_asset_id"
-                                        value=account.default_asset_id.clone()
-                                    />
-                                    <TextField
-                                        label="Name"
-                                        name="account_name"
-                                        value=account.account_name.clone()
-                                    />
-                                    <SelectField label="Type" name="account_type">
-                                        {AccountType::ALL
-                                            .iter()
-                                            .map(|account_type| {
-                                                let account_type = *account_type;
-                                                view! {
-                                                    <option
-                                                        value=account_type.as_db_str()
-                                                        selected=account_type == current_type
-                                                    >
-                                                        {account_type.label()}
-                                                    </option>
-                                                }
-                                            })
-                                            .collect_view()}
-                                    </SelectField>
-                                    <FormError message=edit_error />
-                                    <Button pending=edit.pending()>"Save"</Button>
-                                </ActionForm>
+                                        <hr />
 
-                                <DeleteAccountForm
-                                    account_id=account_id
-                                    action=delete
-                                    error=delete_error
-                                />
+                                        <DeleteAccountForm
+                                            account_id=account_id
+                                            action=delete
+                                            error=delete_error
+                                        />
+                                    </Panel>
 
-                                <TransactionsList
-                                    account_id=transactions_account_id
-                                    default_asset_id=transactions_default_asset_id
-                                    actions=ledger_actions
-                                />
+                                    <Panel title="Transactions" span=12>
+                                        <TransactionsList
+                                            account_id=transactions_account_id
+                                            default_asset_id=transactions_default_asset_id
+                                            actions=ledger_actions
+                                        />
+                                    </Panel>
+                                </div>
                             }
                                 .into_any()
                         }
@@ -401,7 +427,8 @@ fn DeleteAccountForm(
                 view! {
                     <button
                         type="button"
-                        class="btn"
+                        class="btn btn--danger"
+                        aria-expanded="false"
                         on:click=move |_| confirming.set(true)
                     >
                         "Delete account"
@@ -411,11 +438,20 @@ fn DeleteAccountForm(
         >
             <ActionForm action=action>
                 <input type="hidden" name="id" value=move || account_id.get() />
+                <p class="field-note">
+                    "This removes the account and its transactions. It can't be undone."
+                </p>
                 <FormError message=error />
-                <Button pending=action.pending()>"Confirm delete"</Button>
-                <button type="button" class="btn" on:click=move |_| confirming.set(false)>
-                    "Cancel"
-                </button>
+                <div class="form-actions">
+                    <Button variant="danger" pending=action.pending()>"Delete permanently"</Button>
+                    <button
+                        type="button"
+                        class="btn btn--secondary"
+                        on:click=move |_| confirming.set(false)
+                    >
+                        "Cancel"
+                    </button>
+                </div>
             </ActionForm>
         </Show>
     }
@@ -442,19 +478,13 @@ fn TransactionsList(
     };
 
     view! {
-        <section class="transactions">
-            <h2>"Transactions"</h2>
-            <LedgerTable filter=filter show_account=false actions=actions />
-            <div class="ledger-actions">
-                <AddTransactionForm
-                    fixed_account=account_context.clone()
-                    action=actions.create_transaction
-                />
-                <AddTransferForm
-                    default_source=account_context
-                    action=actions.create_transfer
-                />
-            </div>
-        </section>
+        <div class="ledger-actions">
+            <AddTransactionForm
+                fixed_account=account_context.clone()
+                action=actions.create_transaction
+            />
+            <AddTransferForm default_source=account_context action=actions.create_transfer />
+        </div>
+        <LedgerTable filter=filter show_account=false actions=actions />
     }
 }

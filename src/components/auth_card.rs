@@ -1,6 +1,7 @@
 use leptos::prelude::*;
 
-/// Centered card layout for the auth pages: a heading plus its content.
+/// Centered card layout for the auth pages: the wordmark, a heading, then its
+/// content. Sits in a full-height centering shell.
 #[component]
 pub fn AuthCard(
     /// Heading text.
@@ -9,9 +10,12 @@ pub fn AuthCard(
     children: Children,
 ) -> impl IntoView {
     view! {
-        <div class="auth-card">
-            <h1>{title}</h1>
-            {children()}
-        </div>
+        <main class="auth-shell">
+            <div class="auth-card">
+                <p class="auth-card__brand">"fin" <b>"All"</b></p>
+                <h1>{title}</h1>
+                {children()}
+            </div>
+        </main>
     }
 }
