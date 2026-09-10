@@ -5,9 +5,10 @@
 //! [`crate::pages::ledger`] table and forms, the same ones `/accounts/:id` uses.
 
 use leptos::prelude::*;
+use leptos_meta::Title;
 
 use crate::accounts::api::list_accounts;
-use crate::components::Layout;
+use crate::components::{Layout, PageHeader, Panel};
 use crate::pages::guard::RequireAuth;
 use crate::pages::ledger::{
     AddTransactionForm, AddTransferForm, LedgerActions, LedgerFilter, LedgerTable,
@@ -17,8 +18,13 @@ use crate::pages::ledger::{
 #[component]
 pub fn TransactionsPage() -> impl IntoView {
     view! {
+        <Title text="Transactions · finAll" />
         <RequireAuth>
             <Layout>
+                <PageHeader
+                    title="Transactions"
+                    description="Every movement across all accounts. Filter by account or date, then load more as you go."
+                />
                 <TransactionsView />
             </Layout>
         </RequireAuth>
@@ -42,68 +48,75 @@ fn TransactionsView() -> impl IntoView {
     };
 
     view! {
-        <h1>"Transactions"</h1>
+        <div class="bento">
+            <Panel title="Record" span=12>
+                <div class="ledger-actions">
+                    <AddTransactionForm action=actions.create_transaction />
+                    <AddTransferForm action=actions.create_transfer />
+                </div>
+            </Panel>
 
-        <div class="ledger-actions">
-            <AddTransactionForm action=actions.create_transaction />
-            <AddTransferForm action=actions.create_transfer />
-        </div>
-
-        <div class="transaction-filters">
-            <div class="field">
-                <label for="filter-account">"Account"</label>
-                <Suspense fallback=|| {
-                    view! { <select id="filter-account" disabled></select> }
-                }>
-                    {move || {
-                        accounts
-                            .get()
-                            .map(|result| match result {
-                                Err(_) => {
-                                    view! { <select id="filter-account" disabled></select> }
-                                        .into_any()
-                                }
-                                Ok(list) => {
-                                    view! {
-                                        <select
-                                            id="filter-account"
-                                            on:change=move |ev| account_id.set(event_target_value(&ev))
-                                        >
-                                            <option value="">"All accounts"</option>
-                                            {list
-                                                .into_iter()
-                                                .map(|account| {
-                                                    view! {
-                                                        <option value=account.id>{account.account_name}</option>
+            <Panel title="Ledger" span=12>
+                <div class="filters">
+                    <div class="field">
+                        <label for="filter-account">"Account"</label>
+                        <Suspense fallback=|| {
+                            view! { <select id="filter-account" disabled></select> }
+                        }>
+                            {move || {
+                                accounts
+                                    .get()
+                                    .map(|result| match result {
+                                        Err(_) => {
+                                            view! { <select id="filter-account" disabled></select> }
+                                                .into_any()
+                                        }
+                                        Ok(list) => {
+                                            view! {
+                                                <select
+                                                    id="filter-account"
+                                                    on:change=move |ev| {
+                                                        account_id.set(event_target_value(&ev))
                                                     }
-                                                })
-                                                .collect_view()}
-                                        </select>
-                                    }
-                                        .into_any()
-                                }
-                            })
-                    }}
-                </Suspense>
-            </div>
-            <div class="field">
-                <label for="filter-from">"From"</label>
-                <input
-                    id="filter-from"
-                    type="date"
-                    on:change=move |ev| from.set(event_target_value(&ev))
-                />
-            </div>
-            <div class="field">
-                <label for="filter-to">"To"</label>
-                <input
-                    id="filter-to"
-                    type="date"
-                    on:change=move |ev| to.set(event_target_value(&ev))
-                />
-            </div>
-        </div>
+                                                >
+                                                    <option value="">"All accounts"</option>
+                                                    {list
+                                                        .into_iter()
+                                                        .map(|account| {
+                                                            view! {
+                                                                <option value=account
+                                                                    .id>{account.account_name}</option>
+                                                            }
+                                                        })
+                                                        .collect_view()}
+                                                </select>
+                                            }
+                                                .into_any()
+                                        }
+                                    })
+                            }}
+                        </Suspense>
+                    </div>
+                    <div class="field">
+                        <label for="filter-from">"From"</label>
+                        <input
+                            id="filter-from"
+                            type="date"
+                            on:change=move |ev| from.set(event_target_value(&ev))
+                        />
+                    </div>
+                    <div class="field">
+                        <label for="filter-to">"To"</label>
+                        <input
+                            id="filter-to"
+                            type="date"
+                            on:change=move |ev| to.set(event_target_value(&ev))
+                        />
+                    </div>
+                </div>
 
-        <LedgerTable filter=filter show_account=true actions=actions />
+                <LedgerTable filter=filter show_account=true actions=actions />
+            </Panel>
+        </div>
     }
 }

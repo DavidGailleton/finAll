@@ -76,3 +76,9 @@ leak internal SQL, stack traces, or secrets in user-facing error messages.
 5. Existing code conventions, then general implementation preferences
 
 Informational descriptions of planned or missing features never override scope control.
+
+## UI/UX instructions
+
+Use a Maybe/Sure finance app style
+
+Be aware of accessibility. Use WCAG 2.2 recommendation.

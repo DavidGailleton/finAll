@@ -32,7 +32,9 @@ pub fn GuestOnly(children: ChildrenFn) -> impl IntoView {
 /// While the session check is in flight nothing is rendered. A visitor who is
 /// not signed in is redirected to `/login`; if the check itself fails (a
 /// transport or backend error) an error message is shown in place, rather than
-/// redirecting an authenticated visitor away; otherwise the children render.
+/// redirecting an authenticated visitor away; otherwise the children render and
+/// the [`SessionUser`](crate::auth::types::SessionUser) is provided as context
+/// for the shell to read.
 #[component]
 pub fn RequireAuth(children: ChildrenFn) -> impl IntoView {
     let session = Resource::new(|| (), |_| async move { current_user().await });
@@ -43,13 +45,23 @@ pub fn RequireAuth(children: ChildrenFn) -> impl IntoView {
                 session
                     .get()
                     .map(|result| match result {
-                        Ok(Some(_)) => children(),
+                        Ok(Some(user)) => {
+                            provide_context(user);
+                            children()
+                        }
                         Ok(None) => view! { <Redirect path="/login" /> }.into_any(),
                         Err(err) => {
                             view! {
-                                <p class="form-error" role="alert">
-                                    {server_error_message(&err)}
-                                </p>
+                                <main class="auth-shell">
+                                    <div class="auth-card">
+                                        <p class="auth-card__brand">"fin" <b>"All"</b></p>
+                                        <h1>"Something went wrong"</h1>
+                                        <p class="form-error">{server_error_message(&err)}</p>
+                                        <p class="auth-alt">
+                                            "Reload the page to try again."
+                                        </p>
+                                    </div>
+                                </main>
                             }
                                 .into_any()
                         }

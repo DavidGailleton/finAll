@@ -1,4 +1,5 @@
 use leptos::prelude::*;
+use leptos_meta::Title;
 use leptos_router::components::A;
 use leptos_router::hooks::use_navigate;
 
@@ -11,6 +12,7 @@ use crate::pages::server_error_message;
 #[component]
 pub fn SignupPage() -> impl IntoView {
     view! {
+        <Title text="Create your account · finAll" />
         <GuestOnly>
             <SignupForm />
         </GuestOnly>
@@ -38,10 +40,11 @@ fn SignupForm() -> impl IntoView {
             <ActionForm action=action>
                 <TextField label="Email" name="email" input_type="email" autocomplete="email" />
                 <TextField
-                    label="Display name (optional)"
+                    label="Display name"
                     name="display_name"
                     autocomplete="name"
                     required=false
+                    hint="Optional. Shown in the sidebar."
                 />
                 <TextField
                     label="Password"
@@ -50,7 +53,7 @@ fn SignupForm() -> impl IntoView {
                     autocomplete="new-password"
                 />
                 <FormError message=error />
-                <Button pending=action.pending()>"Sign up"</Button>
+                <Button pending=action.pending()>"Create account"</Button>
             </ActionForm>
             <p class="auth-alt">"Already have an account? " <A href="/login">"Sign in"</A></p>
         </AuthCard>

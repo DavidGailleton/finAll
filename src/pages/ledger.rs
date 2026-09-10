@@ -14,7 +14,7 @@ use crate::accounts::api::list_accounts;
 use crate::assets::currency::api::list_currencies;
 use crate::categories::api::list_categories;
 use crate::categories::types::CategoryDto;
-use crate::components::{Button, FormError, SelectField, TextField};
+use crate::components::{Button, FormError, Money, ScrollableTable, SelectField, TextField};
 use crate::merchants::api::list_merchants;
 use crate::merchants::types::MerchantDto;
 use crate::pages::server_error_message;
@@ -159,29 +159,37 @@ pub fn LedgerTable(
         }
     });
 
+    let caption = if show_account {
+        "Transactions across all accounts"
+    } else {
+        "Transactions for this account"
+    };
+
     view! {
-        <Suspense fallback=|| {
-            view! { <p class="loading">"Loading transactions…"</p> }
-        }>
-            {move || {
-                first_page
-                    .get()
-                    .map(|result| match result {
-                        Err(err) => {
-                            view! {
-                                <p class="form-error" role="alert">
-                                    {server_error_message(&err)}
-                                </p>
+        <div>
+            <Suspense fallback=|| {
+                view! { <p class="loading">"Loading transactions…"</p> }
+            }>
+                {move || {
+                    first_page
+                        .get()
+                        .map(|result| match result {
+                            Err(err) => {
+                                view! { <p class="form-error">{server_error_message(&err)}</p> }
+                                    .into_any()
                             }
-                                .into_any()
-                        }
-                        Ok(page) if page.transactions.is_empty() => {
-                            view! { <p class="empty-state">"No transactions yet."</p> }.into_any()
-                        }
-                        Ok(page) => {
-                            view! {
-                                <div class="table-scroll">
-                                    <table class="transactions-table">
+                            Ok(page) if page.transactions.is_empty() => {
+                                view! {
+                                    <p class="empty-state">
+                                        <strong>"No transactions yet"</strong>
+                                        "Use \u{201C}Add transaction\u{201D} above to record the first one."
+                                    </p>
+                                }
+                                    .into_any()
+                            }
+                            Ok(page) => {
+                                view! {
+                                    <ScrollableTable caption=caption>
                                         <thead>
                                             <tr>
                                                 {show_account
@@ -189,8 +197,10 @@ pub fn LedgerTable(
                                                 <th scope="col">"Date"</th>
                                                 <th scope="col">"Merchant"</th>
                                                 <th scope="col">"Category"</th>
-                                                <th scope="col">"Amount"</th>
-                                                <th scope="col">"Actions"</th>
+                                                <th scope="col" class="num">"Amount"</th>
+                                                <th scope="col">
+                                                    <span class="sr-only">"Actions"</span>
+                                                </th>
                                             </tr>
                                         </thead>
                                         <tbody>
@@ -223,29 +233,29 @@ pub fn LedgerTable(
                                                     .collect_view()
                                             }}
                                         </tbody>
-                                    </table>
-                                </div>
+                                    </ScrollableTable>
+                                }
+                                    .into_any()
                             }
-                                .into_any()
+                        })
+                }}
+            </Suspense>
+            {move || {
+                next_cursor
+                    .get()
+                    .map(|cursor| {
+                        view! {
+                            <button
+                                type="button"
+                                class="btn btn--secondary"
+                                on:click=move |_| more_cursor.set(Some(cursor.clone()))
+                            >
+                                "Load more"
+                            </button>
                         }
                     })
             }}
-        </Suspense>
-        {move || {
-            next_cursor
-                .get()
-                .map(|cursor| {
-                    view! {
-                        <button
-                            type="button"
-                            class="btn"
-                            on:click=move |_| more_cursor.set(Some(cursor.clone()))
-                        >
-                            "Load more"
-                        </button>
-                    }
-                })
-        }}
+        </div>
     }
 }
 
@@ -271,7 +281,8 @@ fn TransactionRow(
     let account_id = transaction.account_id.clone();
     let account_name = transaction.account_name.clone();
     let amount_is_negative = transaction.amount.starts_with('-');
-    let amount_display = format!("{} {}", transaction.amount, transaction.asset_code);
+    let amount = transaction.amount.clone();
+    let asset_code = transaction.asset_code.clone();
     let transfer_id = transaction.transfer_id.clone().unwrap_or_default();
     let transaction_id = transaction.id.clone();
 
@@ -280,8 +291,20 @@ fn TransactionRow(
             .transfer_counterparty
             .clone()
             .unwrap_or_else(|| "—".to_owned());
-        let arrow = if amount_is_negative { "→ " } else { "← " };
-        ("Transfer".to_owned(), format!("{arrow}{counterparty}"))
+        let (word, direction) = if amount_is_negative {
+            ("to", "\u{2192} ")
+        } else {
+            ("from", "\u{2190} ")
+        };
+        (
+            "Transfer".to_owned(),
+            view! {
+                <span aria-hidden="true">{direction}</span>
+                <span class="sr-only">{word} " "</span>
+                {counterparty}
+            }
+            .into_any(),
+        )
     } else {
         (
             transaction
@@ -291,7 +314,8 @@ fn TransactionRow(
             transaction
                 .category_name
                 .clone()
-                .unwrap_or_else(|| "—".to_owned()),
+                .unwrap_or_else(|| "—".to_owned())
+                .into_any(),
         )
     };
 
@@ -307,51 +331,69 @@ fn TransactionRow(
                         </td>
                     }
                 })}
-            <td>{booking_date}</td>
+            <td class="date">{booking_date}</td>
             <td>{label_cell}</td>
             <td>{detail_cell}</td>
-            <td class="transaction-amount">{amount_display}</td>
-            <td class="transaction-actions">
-                <button
-                    type="button"
-                    class="btn"
-                    on:click=move |_| editing.update(|open| *open = !*open)
-                >
-                    {move || {
-                        if editing.get() {
-                            "Cancel"
-                        } else if is_transfer {
-                            "Edit transfer"
-                        } else {
-                            "Edit"
+            <td class="num">
+                <Money amount=amount code=asset_code />
+            </td>
+            <td>
+                <div class="row-actions">
+                    <button
+                        type="button"
+                        class="btn btn--secondary btn--small"
+                        aria-expanded=move || if editing.get() { "true" } else { "false" }
+                        on:click=move |_| editing.update(|open| *open = !*open)
+                    >
+                        {move || {
+                            if editing.get() {
+                                "Cancel"
+                            } else if is_transfer {
+                                "Edit transfer"
+                            } else {
+                                "Edit"
+                            }
+                        }}
+                    </button>
+                    {if is_transfer {
+                        view! {
+                            <VoidTransferForm
+                                transfer_id=transfer_id.clone()
+                                action=actions.void_transfer
+                            />
                         }
+                            .into_any()
+                    } else {
+                        view! {
+                            <DeleteTransactionForm
+                                transaction_id=transaction_id.clone()
+                                action=actions.delete_transaction
+                            />
+                        }
+                            .into_any()
                     }}
-                </button>
+                </div>
                 {if is_transfer {
                     view! {
-                        <VoidTransferForm
-                            transfer_id=transfer_id.clone()
-                            action=actions.void_transfer
-                        />
                         <Show when=move || editing.get() fallback=|| ()>
-                            <EditTransferForm
-                                transfer_id=transfer_id.clone()
-                                action=actions.update_transfer
-                            />
+                            <div class="row-form">
+                                <EditTransferForm
+                                    transfer_id=transfer_id.clone()
+                                    action=actions.update_transfer
+                                />
+                            </div>
                         </Show>
                     }
                         .into_any()
                 } else {
                     view! {
-                        <DeleteTransactionForm
-                            transaction_id=transaction_id.clone()
-                            action=actions.delete_transaction
-                        />
                         <Show when=move || editing.get() fallback=|| ()>
-                            <EditTransactionForm
-                                transaction=dto_for_edit.clone()
-                                action=actions.update_transaction
-                            />
+                            <div class="row-form">
+                                <EditTransactionForm
+                                    transaction=dto_for_edit.clone()
+                                    action=actions.update_transaction
+                                />
+                            </div>
                         </Show>
                     }
                         .into_any()
@@ -392,11 +434,7 @@ fn EditTransactionForm(
                     .get()
                     .map(move |result| match result {
                         Err(err) => {
-                            view! {
-                                <p class="form-error" role="alert">
-                                    {server_error_message(&err)}
-                                </p>
-                            }
+                            view! { <p class="form-error">{server_error_message(&err)}</p> }
                                 .into_any()
                         }
                         Ok((currency_list, category_list, merchant_list)) => {
@@ -422,6 +460,7 @@ fn EditTransactionForm(
                                         label="Amount"
                                         name="amount"
                                         value=transaction.amount.clone()
+                                        hint="Positive is money in, negative is money out."
                                     />
                                     <SelectField label="Currency" name="asset_id">
                                         {currency_list
@@ -546,7 +585,12 @@ fn DeleteTransactionForm(
             when=move || confirming.get()
             fallback=move || {
                 view! {
-                    <button type="button" class="btn" on:click=move |_| confirming.set(true)>
+                    <button
+                        type="button"
+                        class="btn btn--danger btn--small"
+                        aria-expanded="false"
+                        on:click=move |_| confirming.set(true)
+                    >
                         "Delete"
                     </button>
                 }
@@ -555,10 +599,18 @@ fn DeleteTransactionForm(
             <ActionForm action=action>
                 <input type="hidden" name="id" value=move || transaction_id.get() />
                 <FormError message=error />
-                <Button pending=action.pending()>"Confirm delete"</Button>
-                <button type="button" class="btn" on:click=move |_| confirming.set(false)>
-                    "Cancel"
-                </button>
+                <div class="form-actions">
+                    <Button variant="danger" small=true pending=action.pending()>
+                        "Confirm delete"
+                    </Button>
+                    <button
+                        type="button"
+                        class="btn btn--secondary btn--small"
+                        on:click=move |_| confirming.set(false)
+                    >
+                        "Cancel"
+                    </button>
+                </div>
             </ActionForm>
         </Show>
     }
@@ -618,12 +670,17 @@ pub fn AddTransactionForm(
     let currency_id = RwSignal::new(initial_currency);
 
     view! {
-        <div class="add-transaction">
+        <div class="disclosure add-form">
             <Show
                 when=move || adding.get()
                 fallback=move || {
                     view! {
-                        <button type="button" class="btn" on:click=move |_| adding.set(true)>
+                        <button
+                            type="button"
+                            class="btn"
+                            aria-expanded="false"
+                            on:click=move |_| adding.set(true)
+                        >
                             "Add transaction"
                         </button>
                     }
@@ -638,9 +695,7 @@ pub fn AddTransactionForm(
                             .map(|result| match result {
                                 Err(err) => {
                                     view! {
-                                        <p class="form-error" role="alert">
-                                            {server_error_message(&err)}
-                                        </p>
+                                        <p class="form-error">{server_error_message(&err)}</p>
                                     }
                                         .into_any()
                                 }
@@ -702,7 +757,11 @@ pub fn AddTransactionForm(
                                                 input_type="date"
                                                 required=false
                                             />
-                                            <TextField label="Amount" name="amount" />
+                                            <TextField
+                                                label="Amount"
+                                                name="amount"
+                                                hint="Positive is money in, negative is money out."
+                                            />
                                             <div class="field">
                                                 <label for="asset_id">"Currency"</label>
                                                 <select
@@ -735,15 +794,17 @@ pub fn AddTransactionForm(
                                                 merchant=String::new()
                                             />
                                             <FormError message=error />
-                                            <Button pending=action
-                                                .pending()>"Add transaction"</Button>
-                                            <button
-                                                type="button"
-                                                class="btn"
-                                                on:click=move |_| adding.set(false)
-                                            >
-                                                "Cancel"
-                                            </button>
+                                            <div class="form-actions">
+                                                <Button pending=action
+                                                    .pending()>"Add transaction"</Button>
+                                                <button
+                                                    type="button"
+                                                    class="btn btn--secondary"
+                                                    on:click=move |_| adding.set(false)
+                                                >
+                                                    "Cancel"
+                                                </button>
+                                            </div>
                                         </ActionForm>
                                     }
                                         .into_any()
@@ -798,12 +859,17 @@ pub fn AddTransferForm(
     let destination_currency = RwSignal::new(String::new());
 
     view! {
-        <div class="add-transfer">
+        <div class="disclosure add-form">
             <Show
                 when=move || adding.get()
                 fallback=move || {
                     view! {
-                        <button type="button" class="btn" on:click=move |_| adding.set(true)>
+                        <button
+                            type="button"
+                            class="btn"
+                            aria-expanded="false"
+                            on:click=move |_| adding.set(true)
+                        >
                             "Add transfer"
                         </button>
                     }
@@ -818,9 +884,7 @@ pub fn AddTransferForm(
                             .map(|result| match result {
                                 Err(err) => {
                                     view! {
-                                        <p class="form-error" role="alert">
-                                            {server_error_message(&err)}
-                                        </p>
+                                        <p class="form-error">{server_error_message(&err)}</p>
                                     }
                                         .into_any()
                                 }
@@ -975,14 +1039,16 @@ pub fn AddTransferForm(
                                                 required=false
                                             />
                                             <FormError message=error />
-                                            <Button pending=action.pending()>"Add transfer"</Button>
-                                            <button
-                                                type="button"
-                                                class="btn"
-                                                on:click=move |_| adding.set(false)
-                                            >
-                                                "Cancel"
-                                            </button>
+                                            <div class="form-actions">
+                                                <Button pending=action.pending()>"Add transfer"</Button>
+                                                <button
+                                                    type="button"
+                                                    class="btn btn--secondary"
+                                                    on:click=move |_| adding.set(false)
+                                                >
+                                                    "Cancel"
+                                                </button>
+                                            </div>
                                         </ActionForm>
                                     }
                                         .into_any()
@@ -1020,11 +1086,7 @@ fn EditTransferForm(transfer_id: String, action: ServerAction<UpdateTransfer>) -
                 data.get()
                     .map(|result| match result {
                         Err(err) => {
-                            view! {
-                                <p class="form-error" role="alert">
-                                    {server_error_message(&err)}
-                                </p>
-                            }
+                            view! { <p class="form-error">{server_error_message(&err)}</p> }
                                 .into_any()
                         }
                         Ok((transfer, currency_list)) => {
@@ -1124,7 +1186,12 @@ fn VoidTransferForm(transfer_id: String, action: ServerAction<VoidTransfer>) -> 
             when=move || confirming.get()
             fallback=move || {
                 view! {
-                    <button type="button" class="btn" on:click=move |_| confirming.set(true)>
+                    <button
+                        type="button"
+                        class="btn btn--danger btn--small"
+                        aria-expanded="false"
+                        on:click=move |_| confirming.set(true)
+                    >
                         "Void transfer"
                     </button>
                 }
@@ -1133,10 +1200,18 @@ fn VoidTransferForm(transfer_id: String, action: ServerAction<VoidTransfer>) -> 
             <ActionForm action=action>
                 <input type="hidden" name="id" value=move || transfer_id.get() />
                 <FormError message=error />
-                <Button pending=action.pending()>"Confirm void"</Button>
-                <button type="button" class="btn" on:click=move |_| confirming.set(false)>
-                    "Cancel"
-                </button>
+                <div class="form-actions">
+                    <Button variant="danger" small=true pending=action.pending()>
+                        "Confirm void"
+                    </Button>
+                    <button
+                        type="button"
+                        class="btn btn--secondary btn--small"
+                        on:click=move |_| confirming.set(false)
+                    >
+                        "Cancel"
+                    </button>
+                </div>
             </ActionForm>
         </Show>
     }

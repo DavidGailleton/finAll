@@ -1,4 +1,5 @@
 use leptos::prelude::*;
+use leptos_meta::Title;
 use leptos_router::components::A;
 use leptos_router::hooks::use_navigate;
 
@@ -11,6 +12,7 @@ use crate::pages::server_error_message;
 #[component]
 pub fn LoginPage() -> impl IntoView {
     view! {
+        <Title text="Sign in · finAll" />
         <GuestOnly>
             <LoginForm />
         </GuestOnly>
