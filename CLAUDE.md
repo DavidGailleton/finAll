@@ -79,7 +79,6 @@ Informational descriptions of planned or missing features never override scope c
 
 ## UI/UX instructions
 
-For ui/ux use a calm, modular fintech workspace combining the clarity of online banking with the density and flexibility of a professional investment terminal.
-For content use box like bento grid style.
+Use a Maybe/Sure finance app style
 
 Be aware of accessibility. Use WCAG 2.2 recommendation.

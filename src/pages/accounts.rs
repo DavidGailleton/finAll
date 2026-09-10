@@ -13,11 +13,11 @@ use leptos_router::hooks::{use_navigate, use_params_map};
 use crate::accounts::api::{
     get_account, list_accounts, CreateAccount, DeleteAccount, UpdateAccount,
 };
-use crate::accounts::types::AccountType;
+use crate::accounts::types::{AccountDto, AccountType};
 use crate::assets::currency::api::list_currencies;
 use crate::balances::api::account_balance;
 use crate::components::{
-    Button, FormError, Layout, Money, PageHeader, Panel, SelectField, TextField,
+    Button, FormError, Icon, Layout, Money, PageHeader, Panel, SelectField, TextField,
 };
 use crate::pages::guard::RequireAuth;
 use crate::pages::ledger::{
@@ -48,61 +48,156 @@ fn AccountsList() -> impl IntoView {
 
     view! {
         <div class="bento">
-            <Suspense fallback=|| {
-                view! {
-                    <Panel>
-                        <p class="loading">"Loading accounts…"</p>
-                    </Panel>
-                }
-            }>
-                {move || {
-                    accounts
-                        .get()
-                        .map(|result| match result {
-                            Err(err) => {
-                                view! {
-                                    <Panel>
-                                        <p class="form-error">{server_error_message(&err)}</p>
-                                    </Panel>
+            <Panel span=8 title="Your accounts">
+                <Suspense fallback=|| {
+                    view! { <p class="loading">"Loading accounts…"</p> }
+                }>
+                    {move || {
+                        accounts
+                            .get()
+                            .map(|result| match result {
+                                Err(err) => {
+                                    view! { <p class="form-error">{server_error_message(&err)}</p> }
+                                        .into_any()
                                 }
-                                    .into_any()
-                            }
-                            Ok(list) if list.is_empty() => {
-                                view! {
-                                    <Panel>
+                                Ok(list) if list.is_empty() => {
+                                    view! {
                                         <p class="empty-state">
                                             <strong>"No accounts yet"</strong>
                                             "Add your first account to start tracking balances and transactions."
                                         </p>
-                                    </Panel>
+                                    }
+                                        .into_any()
+                                }
+                                Ok(list) => {
+                                    let groups = AccountType::ALL
+                                        .iter()
+                                        .filter_map(|account_type| {
+                                            let account_type = *account_type;
+                                            let members: Vec<AccountDto> = list
+                                                .iter()
+                                                .filter(|a| a.account_type == account_type)
+                                                .cloned()
+                                                .collect();
+                                            (!members.is_empty())
+                                                .then(|| {
+                                                    let count = members.len();
+                                                    view! {
+                                                        <AccountGroup
+                                                            label=account_type.label()
+                                                            icon=type_icon(account_type)
+                                                            count=count
+                                                            accounts=members
+                                                        />
+                                                    }
+                                                })
+                                        })
+                                        .collect_view();
+                                    view! { <div class="stack">{groups}</div> }.into_any()
+                                }
+                            })
+                    }}
+                </Suspense>
+            </Panel>
+            <Panel title="Add account" span=4>
+                <AddAccountForm />
+            </Panel>
+        </div>
+    }
+}
+
+/// Maps an account type to its Lucide icon slug (mirrors `layout::type_icon`).
+fn type_icon(account_type: AccountType) -> &'static str {
+    match account_type {
+        AccountType::Cash => "banknote",
+        AccountType::Bank => "landmark",
+        AccountType::Credit => "credit-card",
+        AccountType::Investment => "trending-up",
+        AccountType::Crypto => "bitcoin",
+        AccountType::Loan => "hand-coins",
+        AccountType::Other => "circle-help",
+    }
+}
+
+/// One account-type section (Sure `_account_groups`): an inset well with a
+/// `TYPE · n` mini-header over a ruled list of rows. Balances stay in each
+/// account's own currency, so there is no cross-currency subtotal.
+#[component]
+fn AccountGroup(
+    label: &'static str,
+    icon: &'static str,
+    count: usize,
+    accounts: Vec<AccountDto>,
+) -> impl IntoView {
+    let rows = accounts
+        .into_iter()
+        .map(|account| view! { <AccountRow account=account icon=icon /> })
+        .collect_view();
+
+    view! {
+        <section class="inset-well">
+            <div class="inset-well__head">
+                <span>{label}</span>
+                <span class="sep">"·"</span>
+                <span>{count}</span>
+            </div>
+            <div class="inset-well__list">{rows}</div>
+        </section>
+    }
+}
+
+/// One account row: a link to its detail page and its current balance, loaded on
+/// its own so a missing exchange rate degrades just this row.
+#[component]
+fn AccountRow(account: AccountDto, icon: &'static str) -> impl IntoView {
+    let account_id = account.id.clone();
+    let name = account.account_name.clone();
+    let sub = account.account_type.label();
+    let href = format!("/accounts/{}", account.id);
+
+    let balance = Resource::new(
+        move || account_id.clone(),
+        |id| async move { account_balance(id).await },
+    );
+
+    view! {
+        <div class="acct-list-row">
+            <span class="filled-icon filled-icon--md">
+                <Icon name=icon size="sm" />
+            </span>
+            <span class="acct-list-row__main">
+                <a href=href>{name}</a>
+                <span class="acct-list-row__sub">{sub}</span>
+            </span>
+            <Suspense fallback=|| {
+                view! { <span class="acct-list-row__bal loading">"…"</span> }
+            }>
+                {move || {
+                    balance
+                        .get()
+                        .map(|result| match result {
+                            Ok(balance) => {
+                                view! {
+                                    <span class="acct-list-row__bal">
+                                        <Money
+                                            amount=balance.amount
+                                            code=balance.currency_code
+                                        />
+                                    </span>
                                 }
                                     .into_any()
                             }
-                            Ok(list) => {
-                                list.into_iter()
-                                    .map(|account| {
-                                        view! {
-                                            <Panel span=4>
-                                                <h2 class="panel__title">
-                                                    <A href=format!("/accounts/{}", account.id)>
-                                                        {account.account_name}
-                                                    </A>
-                                                </h2>
-                                                <span class="badge">
-                                                    {account.account_type.label()}
-                                                </span>
-                                            </Panel>
-                                        }
-                                    })
-                                    .collect_view()
+                            Err(_) => {
+                                view! {
+                                    <span class="acct-list-row__bal field-note">
+                                        "balance unavailable"
+                                    </span>
+                                }
                                     .into_any()
                             }
                         })
                 }}
             </Suspense>
-            <Panel title="Add account" span=4>
-                <AddAccountForm />
-            </Panel>
         </div>
     }
 }

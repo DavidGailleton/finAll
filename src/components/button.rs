@@ -11,9 +11,8 @@ pub fn Button(
     /// The `type` attribute. Defaults to `"submit"`.
     #[prop(default = "submit")]
     kind: &'static str,
-    /// Visual variant: `"primary"` (default, ink-filled), `"secondary"`
-    /// (outline), or `"danger"` (used for the confirm step of a destructive
-    /// action).
+    /// Visual variant: `"primary"` (default, ink-filled), `"secondary"`,
+    /// `"outline"`, `"ghost"`, or `"danger"`.
     #[prop(default = "primary")]
     variant: &'static str,
     /// Render at the smaller inline size (row actions).
@@ -24,10 +23,12 @@ pub fn Button(
     pending: Signal<bool>,
 ) -> impl IntoView {
     let mut class = String::from("btn");
-    if variant == "secondary" {
-        class.push_str(" btn--secondary");
-    } else if variant == "danger" {
-        class.push_str(" btn--danger");
+    match variant {
+        "secondary" => class.push_str(" btn--secondary"),
+        "outline" => class.push_str(" btn--outline"),
+        "ghost" => class.push_str(" btn--ghost"),
+        "danger" => class.push_str(" btn--danger"),
+        _ => {}
     }
     if small {
         class.push_str(" btn--small");

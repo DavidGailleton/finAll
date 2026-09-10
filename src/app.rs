@@ -10,6 +10,31 @@ use crate::pages::{
     SignupPage, TransactionsPage,
 };
 
+/// Applies the saved colour theme before first paint (anti-FOUC) and exposes
+/// `window.__setTheme(light|dark|system)` for the [`ThemeToggle`] buttons.
+/// `data-theme` absent = follow the OS (`prefers-color-scheme`).
+const THEME_SCRIPT: &str = r#"(function(){
+  var d=document.documentElement;
+  function saved(){try{return localStorage.theme||'system'}catch(e){return 'system'}}
+  function apply(t){
+    if(t==='dark')d.setAttribute('data-theme','dark');
+    else if(t==='light')d.setAttribute('data-theme','light');
+    else d.removeAttribute('data-theme');
+  }
+  function marks(t){
+    var els=document.querySelectorAll('[data-theme-toggle] [data-theme-value]');
+    for(var i=0;i<els.length;i++){
+      els[i].setAttribute('aria-pressed',els[i].getAttribute('data-theme-value')===t?'true':'false');
+    }
+  }
+  apply(saved());
+  window.__setTheme=function(t){
+    try{if(t==='system')localStorage.removeItem('theme');else localStorage.theme=t}catch(e){}
+    apply(t);marks(t);
+  };
+  document.addEventListener('DOMContentLoaded',function(){marks(saved())});
+})();"#;
+
 pub fn shell(options: LeptosOptions) -> impl IntoView {
     view! {
         <!DOCTYPE html>
@@ -18,6 +43,7 @@ pub fn shell(options: LeptosOptions) -> impl IntoView {
                 <meta charset="utf-8"/>
                 <meta name="viewport" content="width=device-width, initial-scale=1"/>
                 <meta name="color-scheme" content="light dark"/>
+                <script inner_html=THEME_SCRIPT />
                 <AutoReload options=options.clone() />
                 <HydrationScripts options/>
                 <MetaTags/>

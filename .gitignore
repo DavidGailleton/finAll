@@ -28,3 +28,5 @@ rustc-ice-*.txt
 # site-root). The repo-root copy was committed incidentally with the initial
 # Docker setup and nothing consumes it.
 /site/
+# Vendored reference copy of the Sure app (design reference only)
+sure_example/
