@@ -9,14 +9,13 @@
 //! edit form's "Paired transaction" field.
 
 use leptos::prelude::*;
-use leptos_router::components::A;
 
 use crate::accounts::api::list_accounts;
 use crate::accounts::types::AccountType;
 use crate::assets::currency::api::list_currencies;
 use crate::categories::api::list_categories;
 use crate::categories::types::CategoryDto;
-use crate::components::{Button, FormError, Money, ScrollableTable, SelectField, TextField};
+use crate::components::{Button, FormError, Icon, SelectField, TextField};
 use crate::merchants::api::list_merchants;
 use crate::merchants::types::MerchantDto;
 use crate::pages::server_error_message;
@@ -25,6 +24,94 @@ use crate::transactions::api::{
 };
 use crate::transactions::types::TransactionDto;
 use crate::transfers::api::{paired_transaction_options, LinkTransfer, UnlinkTransfer};
+
+/// `"2026-01-05"` → `"January 5, 2026"`; the raw string back on any parse failure.
+fn long_date(iso: &str) -> String {
+    const MONTHS: [&str; 12] = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
+    let mut parts = iso.split('-');
+    let (Some(year), Some(month), Some(day)) = (parts.next(), parts.next(), parts.next()) else {
+        return iso.to_owned();
+    };
+    match (month.parse::<usize>(), day.parse::<u32>()) {
+        (Ok(month), Ok(day)) => match MONTHS.get(month.wrapping_sub(1)) {
+            Some(name) => format!("{name} {day}, {year}"),
+            None => iso.to_owned(),
+        },
+        _ => iso.to_owned(),
+    }
+}
+
+/// Tidy a stored `NUMERIC(38, 18)` string for display: keep at least two
+/// fractional digits, drop pointless trailing zeros beyond that.
+/// `"100.000000000000000000"` → `"100.00"`, `"1.2300"` → `"1.23"`.
+fn trim_amount(raw: &str) -> String {
+    let (int, frac) = raw.split_once('.').unwrap_or((raw, ""));
+    let frac = frac.trim_end_matches('0');
+    if frac.len() >= 2 {
+        format!("{int}.{frac}")
+    } else {
+        format!("{int}.{frac:0<2}")
+    }
+}
+
+/// The first alphanumeric character of a name, for the row avatar; `"?"` when
+/// there is none.
+fn first_initial(seed: &str) -> String {
+    seed.chars()
+        .find(|c| c.is_alphanumeric())
+        .map(|c| c.to_uppercase().to_string())
+        .unwrap_or_else(|| "?".to_owned())
+}
+
+/// Split a flat, newest-first transaction list into consecutive same-day groups.
+fn group_by_date(rows: Vec<TransactionDto>) -> Vec<(String, Vec<TransactionDto>)> {
+    let mut groups: Vec<(String, Vec<TransactionDto>)> = Vec::new();
+    for row in rows {
+        match groups.last_mut() {
+            Some((date, bucket)) if *date == row.booking_date => bucket.push(row),
+            _ => groups.push((row.booking_date.clone(), vec![row])),
+        }
+    }
+    groups
+}
+
+/// A day's per-currency total of its non-transfer amounts, tidy-formatted.
+fn day_subtotals(rows: &[TransactionDto]) -> Vec<(String, String)> {
+    use std::str::FromStr;
+
+    use bigdecimal::BigDecimal;
+
+    let mut totals: Vec<(String, BigDecimal)> = Vec::new();
+    for row in rows {
+        if row.transfer_id.is_some() {
+            continue;
+        }
+        let Ok(amount) = BigDecimal::from_str(&row.amount) else {
+            continue;
+        };
+        match totals.iter_mut().find(|(code, _)| *code == row.asset_code) {
+            Some((_, total)) => *total += &amount,
+            None => totals.push((row.asset_code.clone(), amount)),
+        }
+    }
+    totals
+        .into_iter()
+        .map(|(code, total)| (code, trim_amount(&total.to_string())))
+        .collect()
+}
 
 /// The account a transaction is being added on, when it is fixed (the
 /// `/accounts/:id` page). Absent on `/transactions`, where the form shows an
@@ -160,14 +247,8 @@ pub fn LedgerTable(
         }
     });
 
-    let caption = if show_account {
-        "Transactions across all accounts"
-    } else {
-        "Transactions for this account"
-    };
-
     view! {
-        <div>
+        <div class="txn-list">
             <Suspense fallback=|| {
                 view! { <p class="loading">"Loading transactions…"</p> }
             }>
@@ -179,62 +260,68 @@ pub fn LedgerTable(
                                 view! { <p class="form-error">{server_error_message(&err)}</p> }
                                     .into_any()
                             }
-                            Ok(page) if page.transactions.is_empty() => {
-                                view! {
-                                    <p class="empty-state">
-                                        <strong>"No transactions yet"</strong>
-                                        "Use \u{201C}Add transaction\u{201D} above to record the first one."
-                                    </p>
-                                }
-                                    .into_any()
-                            }
                             Ok(page) => {
+                                let mut rows = page.transactions;
+                                rows.extend(extra.get());
+                                if rows.is_empty() {
+                                    return view! {
+                                        <p class="txn-empty">
+                                            <strong>"No transactions yet"</strong>
+                                            "Use \u{201C}Add transaction\u{201D} above to record the first one."
+                                        </p>
+                                    }
+                                        .into_any();
+                                }
                                 view! {
-                                    <ScrollableTable caption=caption>
-                                        <thead>
-                                            <tr>
-                                                {show_account
-                                                    .then(|| view! { <th scope="col">"Account"</th> })}
-                                                <th scope="col">"Date"</th>
-                                                <th scope="col">"Merchant"</th>
-                                                <th scope="col">"Category"</th>
-                                                <th scope="col" class="num">"Amount"</th>
-                                                <th scope="col">
-                                                    <span class="sr-only">"Actions"</span>
-                                                </th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            {page
-                                                .transactions
-                                                .into_iter()
-                                                .map(|transaction| {
-                                                    view! {
-                                                        <TransactionRow
-                                                            transaction=transaction
-                                                            show_account=show_account
-                                                            actions=actions
-                                                        />
-                                                    }
-                                                })
-                                                .collect_view()}
-                                            {move || {
-                                                extra
-                                                    .get()
-                                                    .into_iter()
-                                                    .map(|transaction| {
-                                                        view! {
-                                                            <TransactionRow
-                                                                transaction=transaction
-                                                                show_account=show_account
-                                                                actions=actions
-                                                            />
-                                                        }
-                                                    })
-                                                    .collect_view()
-                                            }}
-                                        </tbody>
-                                    </ScrollableTable>
+                                    <div class="txn-list__head" aria-hidden="true">
+                                        <span>"Transaction"</span>
+                                        <span class="txn-list__head--cat">"Category"</span>
+                                        <span class="txn-list__head--amt">"Amount"</span>
+                                    </div>
+                                    {group_by_date(rows)
+                                        .into_iter()
+                                        .map(|(date, rows)| {
+                                            let count = rows.len();
+                                            let subtotals = day_subtotals(&rows);
+                                            view! {
+                                                <section class="txn-group">
+                                                    <header class="txn-group__head">
+                                                        <span>
+                                                            <span class="txn-group__date">
+                                                                {long_date(&date)}
+                                                            </span>
+                                                            " \u{00b7} "
+                                                            <span>{count}</span>
+                                                        </span>
+                                                        <span class="txn-group__total">
+                                                            {subtotals
+                                                                .into_iter()
+                                                                .map(|(code, total)| {
+                                                                    view! {
+                                                                        <span>{total} " " {code}</span>
+                                                                    }
+                                                                })
+                                                                .collect_view()}
+                                                        </span>
+                                                    </header>
+                                                    <div class="txn-group__rows">
+                                                        {rows
+                                                            .into_iter()
+                                                            .map(|transaction| {
+                                                                view! {
+                                                                    <TransactionRow
+                                                                        transaction=transaction
+                                                                        show_account=show_account
+                                                                        actions=actions
+                                                                    />
+                                                                }
+                                                            })
+                                                            .collect_view()}
+                                                    </div>
+                                                </section>
+                                            }
+                                        })
+                                        .collect_view()}
                                 }
                                     .into_any()
                             }
@@ -248,7 +335,7 @@ pub fn LedgerTable(
                         view! {
                             <button
                                 type="button"
-                                class="btn btn--secondary"
+                                class="btn btn--secondary txn-list__more"
                                 on:click=move |_| more_cursor.set(Some(cursor.clone()))
                             >
                                 "Load more"
@@ -279,110 +366,136 @@ fn TransactionRow(
         }
     });
 
-    let booking_date = transaction.booking_date.clone();
-    let account_id = transaction.account_id.clone();
-    let account_name = transaction.account_name.clone();
     let amount_is_negative = transaction.amount.starts_with('-');
-    let amount = transaction.amount.clone();
     let asset_code = transaction.asset_code.clone();
     let transaction_id = transaction.id.clone();
-
-    // A foreign-currency transaction also shows its value in the account's
-    // currency, translated at its booking-date rate.
-    let is_foreign = transaction.asset_id != transaction.account_default_asset_id;
-    let converted_cell = is_foreign.then(|| {
-        let code = transaction.account_currency_code.clone();
-        match transaction.account_amount.clone() {
-            Some(converted) => view! {
-                <span class="muted" aria-hidden="true">" \u{2192} "</span>
-                <Money amount=converted code=code />
-            }
-            .into_any(),
-            None => view! { <span class="muted">" (conversion pending)"</span> }.into_any(),
-        }
-    });
-
-    let (label_cell, detail_cell) = if is_transfer {
-        let counterparty = transaction
-            .transfer_counterparty
-            .clone()
-            .unwrap_or_else(|| "—".to_owned());
-        let (word, direction) = if amount_is_negative {
-            ("to", "\u{2192} ")
-        } else {
-            ("from", "\u{2190} ")
-        };
-        (
-            "Transfer".to_owned(),
-            view! {
-                <span aria-hidden="true">{direction}</span>
-                <span class="sr-only">{word} " "</span>
-                {counterparty}
-            }
-            .into_any(),
-        )
-    } else {
-        (
-            transaction
-                .merchant_name
-                .clone()
-                .unwrap_or_else(|| "—".to_owned()),
-            transaction
-                .category_name
-                .clone()
-                .unwrap_or_else(|| "—".to_owned())
-                .into_any(),
-        )
-    };
-
     let dto_for_edit = transaction.clone();
 
+    // Primary line: the merchant (or "Transfer", or a dash).
+    let name = if is_transfer {
+        "Transfer".to_owned()
+    } else {
+        transaction
+            .merchant_name
+            .clone()
+            .unwrap_or_else(|| "\u{2014}".to_owned())
+    };
+
+    // Avatar: a transfer glyph, else the initial of the merchant/category.
+    let avatar = if is_transfer {
+        view! { <Icon name="arrow-left-right" size="sm" /> }.into_any()
+    } else {
+        let seed = transaction
+            .merchant_name
+            .clone()
+            .or_else(|| transaction.category_name.clone())
+            .unwrap_or_default();
+        view! { {first_initial(&seed)} }.into_any()
+    };
+
+    // Sub-meta: transfer counterparty / account name / the account-currency value
+    // of a foreign transaction, joined with " · ".
+    let meta = {
+        let mut parts: Vec<String> = Vec::new();
+        if is_transfer {
+            let counterparty = transaction
+                .transfer_counterparty
+                .clone()
+                .unwrap_or_else(|| "\u{2014}".to_owned());
+            let arrow = if amount_is_negative {
+                "\u{2192}"
+            } else {
+                "\u{2190}"
+            };
+            parts.push(format!("{arrow} {counterparty}"));
+        } else if show_account {
+            parts.push(transaction.account_name.clone());
+        }
+        if transaction.asset_id != transaction.account_default_asset_id {
+            match transaction.account_amount.clone() {
+                Some(converted) => parts.push(format!(
+                    "{} {}",
+                    trim_amount(&converted),
+                    transaction.account_currency_code,
+                )),
+                None => parts.push("conversion pending".to_owned()),
+            }
+        }
+        parts.join(" \u{00b7} ")
+    };
+
+    let category = transaction
+        .category_name
+        .clone()
+        .unwrap_or_else(|| "Uncategorized".to_owned());
+    let category_title = category.clone();
+
+    // Amount, Sure palette: money in is green, money out is neutral, a transfer
+    // shows "± " on the absolute value.
+    let magnitude = trim_amount(
+        transaction
+            .amount
+            .strip_prefix('-')
+            .unwrap_or(&transaction.amount),
+    );
+    let (sign_sr, sign_glyph) = if is_transfer {
+        (String::new(), "\u{00b1}\u{00a0}".to_owned())
+    } else if amount_is_negative {
+        ("negative ".to_owned(), "\u{2212}".to_owned())
+    } else {
+        ("positive ".to_owned(), "+".to_owned())
+    };
+    let amount_in = !is_transfer && !amount_is_negative;
+
+    let aria_label = format!("Edit transaction: {name}");
+
     view! {
-        <tr>
-            {show_account
-                .then(|| {
-                    view! {
-                        <td>
-                            <A href=format!("/accounts/{account_id}")>{account_name}</A>
-                        </td>
-                    }
-                })}
-            <td class="date">{booking_date}</td>
-            <td>{label_cell}</td>
-            <td>{detail_cell}</td>
-            <td class="num">
-                <Money amount=amount code=asset_code />
-                {converted_cell}
-            </td>
-            <td>
-                <div class="row-actions">
-                    <button
-                        type="button"
-                        class="btn btn--secondary btn--small"
-                        aria-expanded=move || if editing.get() { "true" } else { "false" }
-                        on:click=move |_| editing.update(|open| *open = !*open)
-                    >
-                        {move || if editing.get() { "Cancel" } else { "Edit" }}
-                    </button>
-                    {view! {
+        <div class="txn-row" class:txn-row--editing=move || editing.get()>
+            <button
+                type="button"
+                class="txn-row__open"
+                aria-expanded=move || if editing.get() { "true" } else { "false" }
+                aria-label=aria_label
+                on:click=move |_| editing.update(|open| *open = !*open)
+            >
+                <span class="txn-avatar" class:txn-avatar--transfer=is_transfer aria-hidden="true">
+                    {avatar}
+                </span>
+                <span class="txn-row__body">
+                    <span class="txn-row__title">
+                        <span class="txn-row__name">{name}</span>
+                        {is_transfer.then(|| view! { <span class="txn-tag">"Transfer"</span> })}
+                    </span>
+                    {(!meta.is_empty())
+                        .then(|| view! { <span class="txn-row__meta">{meta}</span> })}
+                </span>
+            </button>
+
+            <span class="txn-row__cat">
+                <span class="txn-pill" title=category_title>{category}</span>
+            </span>
+
+            <span class="txn-row__amt" class:txn-amt--in=amount_in>
+                {(!sign_sr.is_empty()).then(|| view! { <span class="sr-only">{sign_sr}</span> })}
+                <span aria-hidden="true">{sign_glyph}</span>
+                {magnitude}
+                <span class="txn-amt__code">{asset_code}</span>
+            </span>
+
+            {view! {
+                <Show when=move || editing.get() fallback=|| ()>
+                    <div class="txn-row__edit">
+                        <EditTransactionForm transaction=dto_for_edit.clone() actions=actions />
                         <DeleteTransactionForm
                             transaction_id=transaction_id.clone()
                             is_transfer=is_transfer
                             action=actions.delete_transaction
                         />
-                    }
-                        .into_any()}
-                </div>
-                {view! {
-                    <Show when=move || editing.get() fallback=|| ()>
-                        <div class="row-form">
-                            <EditTransactionForm transaction=dto_for_edit.clone() actions=actions />
-                        </div>
-                    </Show>
-                }
-                    .into_any()}
-            </td>
-        </tr>
+                    </div>
+                </Show>
+            }
+                .into_any()}
+        </div>
     }
 }
 
@@ -943,5 +1056,93 @@ pub fn AddTransactionForm(
                 </Suspense>
             </Show>
         </div>
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn txn(date: &str, amount: &str, code: &str, transfer: bool) -> TransactionDto {
+        TransactionDto {
+            id: String::new(),
+            account_id: String::new(),
+            account_name: "Acct".to_owned(),
+            account_type: AccountType::Bank,
+            account_default_asset_id: "eur".to_owned(),
+            account_currency_code: "EUR".to_owned(),
+            amount: amount.to_owned(),
+            account_amount: Some(amount.to_owned()),
+            fx_rate: None,
+            asset_id: "eur".to_owned(),
+            asset_code: code.to_owned(),
+            booking_date: date.to_owned(),
+            value_date: None,
+            category_id: None,
+            category_name: None,
+            merchant_id: None,
+            merchant_name: None,
+            transfer_id: transfer.then(|| "t".to_owned()),
+            transfer_counterparty: None,
+        }
+    }
+
+    #[test]
+    fn long_date_formats_or_falls_back() {
+        assert_eq!(long_date("2026-01-05"), "January 5, 2026");
+        assert_eq!(long_date("2026-12-31"), "December 31, 2026");
+        assert_eq!(long_date("nonsense"), "nonsense");
+        assert_eq!(long_date("2026-13-01"), "2026-13-01");
+    }
+
+    #[test]
+    fn trim_amount_keeps_two_decimals_and_drops_the_rest() {
+        assert_eq!(trim_amount("100.000000000000000000"), "100.00");
+        assert_eq!(trim_amount("1.2300"), "1.23");
+        assert_eq!(trim_amount("-40.00"), "-40.00");
+        assert_eq!(trim_amount("5"), "5.00");
+        assert_eq!(trim_amount("1.2"), "1.20");
+        assert_eq!(trim_amount("0.123456"), "0.123456");
+    }
+
+    #[test]
+    fn first_initial_takes_the_first_letter() {
+        assert_eq!(first_initial("acme corp"), "A");
+        assert_eq!(first_initial("  7-eleven"), "7");
+        assert_eq!(first_initial("\u{2014}"), "?");
+        assert_eq!(first_initial(""), "?");
+    }
+
+    #[test]
+    fn group_by_date_keeps_consecutive_same_day_rows_together() {
+        let rows = vec![
+            txn("2026-01-16", "10", "EUR", false),
+            txn("2026-01-16", "20", "EUR", false),
+            txn("2026-01-15", "5", "EUR", false),
+        ];
+        let groups = group_by_date(rows);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].0, "2026-01-16");
+        assert_eq!(groups[0].1.len(), 2);
+        assert_eq!(groups[1].1.len(), 1);
+    }
+
+    #[test]
+    fn day_subtotals_sum_per_currency_and_skip_transfers() {
+        let rows = vec![
+            txn("2026-01-16", "10.00", "EUR", false),
+            txn("2026-01-16", "-2.50", "EUR", false),
+            txn("2026-01-16", "100.00", "USD", false),
+            txn("2026-01-16", "999.00", "EUR", true), // transfer leg, ignored
+        ];
+        let mut totals = day_subtotals(&rows);
+        totals.sort();
+        assert_eq!(
+            totals,
+            vec![
+                ("EUR".to_owned(), "7.50".to_owned()),
+                ("USD".to_owned(), "100.00".to_owned()),
+            ]
+        );
     }
 }
