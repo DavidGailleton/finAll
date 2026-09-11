@@ -11,6 +11,7 @@ pub mod error;
 pub mod income_expense;
 pub mod merchants;
 pub mod net_worth;
+pub mod seed;
 pub mod transactions;
 pub mod transfers;
 

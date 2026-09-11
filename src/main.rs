@@ -56,6 +56,17 @@ async fn main() {
     let fx_cache = fin_all::server::assets::fx_cache::FxRateCache::new()
         .expect("could not build the Frankfurter HTTP client");
 
+    // Dev-only: seed a demo login with a few accounts, categories, merchants,
+    // and transactions, so the app has something to show without any manual
+    // setup. Never runs when `LEPTOS_ENV=PROD` (the shipped production compose
+    // file always sets it); idempotent, so restarting the dev stack is safe.
+    if leptos_options.env == leptos::config::Env::DEV {
+        match fin_all::server::seed::seed_demo_account(&pool, &fx_cache).await {
+            Ok(()) => {}
+            Err(_) => log!("seed: could not seed the demo account"),
+        }
+    }
+
     // Keep the currency list in step with Frankfurter's `/v2/currencies`: run
     // once now (startup) and then on the 1st of each month at 00:00 UTC. A new
     // currency is inserted; an existing one is refreshed only when its name,
