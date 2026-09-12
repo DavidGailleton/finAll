@@ -15,14 +15,17 @@ use crate::accounts::types::AccountType;
 use crate::assets::currency::api::list_currencies;
 use crate::categories::api::list_categories;
 use crate::categories::types::CategoryDto;
-use crate::components::{Button, FormError, Icon, SelectField, TextField};
+use crate::components::{Button, FormError, Icon, ScrollableTable, SelectField, TextField};
 use crate::merchants::api::list_merchants;
 use crate::merchants::types::MerchantDto;
 use crate::pages::server_error_message;
 use crate::transactions::api::{
-    list_transactions, CreateTransaction, DeleteTransaction, ImportTransactions, UpdateTransaction,
+    list_transactions, ConfirmStatementImport, CreateTransaction, DeleteTransaction,
+    ExtractStatementPdf, ImportTransactions, UpdateTransaction,
 };
-use crate::transactions::types::{ImportSummary, TransactionDto};
+use crate::transactions::types::{
+    ConfirmedRowDto, ExtractedRowDto, ImportSummary, StatementExtractionDto, TransactionDto,
+};
 use crate::transfers::api::{paired_transaction_options, LinkTransfer, UnlinkTransfer};
 
 /// `"2026-01-05"` → `"January 5, 2026"`; the raw string back on any parse failure.
@@ -132,6 +135,8 @@ pub struct LedgerActions {
     pub update_transaction: ServerAction<UpdateTransaction>,
     pub delete_transaction: ServerAction<DeleteTransaction>,
     pub import_transactions: ServerAction<ImportTransactions>,
+    pub extract_statement_pdf: ServerAction<ExtractStatementPdf>,
+    pub confirm_statement_import: ServerAction<ConfirmStatementImport>,
     pub link_transfer: ServerAction<LinkTransfer>,
     pub unlink_transfer: ServerAction<UnlinkTransfer>,
 }
@@ -143,6 +148,8 @@ impl LedgerActions {
             update_transaction: ServerAction::new(),
             delete_transaction: ServerAction::new(),
             import_transactions: ServerAction::new(),
+            extract_statement_pdf: ServerAction::new(),
+            confirm_statement_import: ServerAction::new(),
             link_transfer: ServerAction::new(),
             unlink_transfer: ServerAction::new(),
         }
@@ -189,6 +196,7 @@ pub fn LedgerTable(
                 actions.update_transaction.version().get(),
                 actions.delete_transaction.version().get(),
                 actions.import_transactions.version().get(),
+                actions.confirm_statement_import.version().get(),
                 actions.link_transfer.version().get(),
                 actions.unlink_transfer.version().get(),
             )
@@ -1203,6 +1211,458 @@ pub fn ImportTransactionsForm(
                 <FormError message=error />
                 {move || {
                     action
+                        .value()
+                        .get()
+                        .and_then(|result| result.ok())
+                        .map(|summary: ImportSummary| {
+                            view! {
+                                <p class="field-note">
+                                    {format!("Imported {} transaction(s).", summary.imported)}
+                                </p>
+                                {(!summary.rejected.is_empty())
+                                    .then(|| {
+                                        view! {
+                                            <ul class="import-rejections">
+                                                {summary
+                                                    .rejected
+                                                    .into_iter()
+                                                    .map(|row| {
+                                                        view! {
+                                                            <li>
+                                                                {format!("Row {}: {}", row.row_number, row.reason)}
+                                                            </li>
+                                                        }
+                                                    })
+                                                    .collect_view()}
+                                            </ul>
+                                        }
+                                    })}
+                            }
+                        })
+                }}
+                <button
+                    type="button"
+                    class="btn btn--secondary btn--small"
+                    on:click=move |_| importing.set(false)
+                >
+                    "Close"
+                </button>
+            </Show>
+        </div>
+    }
+}
+
+/// A `FnOnce` file-read callback that may be delivered from either of two
+/// places (see [`read_file_as_bytes`]), shared via `Rc<RefCell<Option<_>>>` so
+/// it is taken out and called exactly once no matter which path fires.
+#[cfg(feature = "hydrate")]
+type FileBytesReadCallback =
+    std::rc::Rc<std::cell::RefCell<Option<Box<dyn FnOnce(Result<Vec<u8>, String>)>>>>;
+
+/// Read `file`'s contents as raw bytes and call `on_result` once with the
+/// outcome. Only ever invoked from the browser -- hydrate-only, mirroring
+/// [`read_file_as_text`] but for a PDF's binary content (`js_sys::Uint8Array`
+/// copies a `read_as_array_buffer` result out as a `Vec<u8>`).
+#[cfg(feature = "hydrate")]
+fn read_file_as_bytes(
+    file: web_sys::File,
+    on_result: impl FnOnce(Result<Vec<u8>, String>) + 'static,
+) {
+    use wasm_bindgen::closure::Closure;
+    use wasm_bindgen::JsCast;
+
+    let on_result: FileBytesReadCallback =
+        std::rc::Rc::new(std::cell::RefCell::new(Some(Box::new(on_result))));
+
+    let deliver = {
+        let on_result = on_result.clone();
+        move |result: Result<Vec<u8>, String>| {
+            if let Some(on_result) = on_result.borrow_mut().take() {
+                on_result(result);
+            }
+        }
+    };
+
+    let reader = match web_sys::FileReader::new() {
+        Ok(reader) => reader,
+        Err(_) => return deliver(Err("could not read the selected file".to_owned())),
+    };
+
+    let reader_for_load = reader.clone();
+    let deliver_for_load = deliver.clone();
+    let onload = Closure::once(move |_event: web_sys::Event| {
+        let result = match reader_for_load.result() {
+            Ok(value) => value
+                .dyn_into::<js_sys::ArrayBuffer>()
+                .map(|buffer| js_sys::Uint8Array::new(&buffer).to_vec())
+                .map_err(|_| "the selected file could not be read".to_owned()),
+            Err(_) => Err("could not read the selected file".to_owned()),
+        };
+        deliver_for_load(result);
+    });
+    reader.set_onload(Some(onload.as_ref().unchecked_ref()));
+    onload.forget();
+
+    if reader.read_as_array_buffer(&file).is_err() {
+        deliver(Err("could not read the selected file".to_owned()));
+    }
+}
+
+/// One extracted row as it's edited during review, before being sent to
+/// [`ConfirmStatementImport`]. `description` is a read-only hint (never sent
+/// back); every other field is user-editable, pre-filled from the
+/// extraction.
+#[derive(Clone)]
+struct ReviewRow {
+    row_number: usize,
+    description: String,
+    booking_date: RwSignal<String>,
+    value_date: RwSignal<String>,
+    amount: RwSignal<String>,
+    category_id: RwSignal<String>,
+    merchant_id: RwSignal<String>,
+}
+
+impl ReviewRow {
+    fn from_extracted(row: ExtractedRowDto) -> Self {
+        ReviewRow {
+            row_number: row.row_number,
+            description: row.description,
+            booking_date: RwSignal::new(row.booking_date),
+            value_date: RwSignal::new(row.value_date.unwrap_or_default()),
+            amount: RwSignal::new(row.amount),
+            category_id: RwSignal::new(String::new()),
+            merchant_id: RwSignal::new(row.suggested_merchant_id.unwrap_or_default()),
+        }
+    }
+
+    fn to_confirmed(&self) -> ConfirmedRowDto {
+        ConfirmedRowDto {
+            booking_date: self.booking_date.get(),
+            value_date: Some(self.value_date.get()).filter(|v| !v.is_empty()),
+            amount: self.amount.get(),
+            category_id: self.category_id.get(),
+            merchant_id: self.merchant_id.get(),
+        }
+    }
+}
+
+/// The account's "Import PDF statement" section: upload a bank-statement PDF,
+/// review/edit the extracted rows (pre-filled where the parser and merchant
+/// matching were confident), then confirm to insert them -- unlike the CSV
+/// import, nothing is written until the user confirms, since PDF text
+/// extraction is inherently less reliable than a CSV column.
+#[component]
+pub fn ImportStatementForm(
+    account_id: String,
+    extract_action: ServerAction<ExtractStatementPdf>,
+    confirm_action: ServerAction<ConfirmStatementImport>,
+) -> impl IntoView {
+    // Held in a `StoredValue` so the nested `<Show>` children closures (each
+    // an `Fn`) can rebuild their content on each toggle without moving it.
+    let account_id = StoredValue::new(account_id);
+    let importing = RwSignal::new(false);
+    let statement_year = RwSignal::new(String::new());
+    let file_error = RwSignal::new(None::<String>);
+    let reviewing = RwSignal::new(false);
+    let review_rows = RwSignal::new(Vec::<ReviewRow>::new());
+    let extraction_rejected =
+        RwSignal::new(Vec::<crate::transactions::types::ImportRowError>::new());
+
+    // Once extraction succeeds, populate the editable review rows.
+    Effect::new(move |_| {
+        if let Some(Ok(extraction)) = extract_action.value().get() {
+            let StatementExtractionDto { rows, rejected } = extraction;
+            review_rows.set(rows.into_iter().map(ReviewRow::from_extracted).collect());
+            extraction_rejected.set(rejected);
+            reviewing.set(true);
+        }
+    });
+
+    // Once confirm succeeds, clear the reviewed rows so a stray extra click
+    // can't re-submit (and re-insert) the same rows -- the outcome summary
+    // below still reflects the last confirm regardless.
+    Effect::new(move |_| {
+        if matches!(confirm_action.value().get(), Some(Ok(_))) {
+            review_rows.set(Vec::new());
+            reviewing.set(false);
+        }
+    });
+
+    let file_read_error = Signal::derive(move || {
+        file_error
+            .get()
+            .or_else(|| match extract_action.value().get() {
+                Some(Err(err)) => Some(server_error_message(&err)),
+                _ => None,
+            })
+    });
+    let confirm_error = Signal::derive(move || match confirm_action.value().get() {
+        Some(Err(err)) => Some(server_error_message(&err)),
+        _ => None,
+    });
+
+    // Category/merchant pick lists, fetched only once a review is underway.
+    let pick_lists = Resource::new(
+        move || reviewing.get(),
+        move |reviewing| async move {
+            if !reviewing {
+                return Ok::<_, ServerFnError>((Vec::new(), Vec::new()));
+            }
+            let categories = list_categories().await?;
+            let merchants = list_merchants().await?;
+            Ok((categories, merchants))
+        },
+    );
+
+    view! {
+        <div class="disclosure add-form">
+            <Show
+                when=move || importing.get()
+                fallback=move || {
+                    view! {
+                        <button
+                            type="button"
+                            class="btn btn--secondary"
+                            aria-expanded="false"
+                            on:click=move |_| importing.set(true)
+                        >
+                            "Import PDF statement"
+                        </button>
+                    }
+                }
+            >
+                <p class="field-note">
+                    "Upload a Deblock account statement PDF. Extracted rows are shown below for review before anything is imported."
+                </p>
+                <div class="field">
+                    <label for="import_statement_year">
+                        "Statement year (only needed for English-language statements, which don't print one)"
+                    </label>
+                    <input
+                        id="import_statement_year"
+                        type="number"
+                        inputmode="numeric"
+                        prop:value=move || statement_year.get()
+                        on:input=move |ev| statement_year.set(event_target_value(&ev))
+                    />
+                </div>
+                <div class="field">
+                    <label for="import_statement_file">"Statement PDF"</label>
+                    <input
+                        id="import_statement_file"
+                        type="file"
+                        accept=".pdf,application/pdf"
+                        on:change=move |_ev| {
+                            file_error.set(None);
+                            #[cfg(feature = "hydrate")]
+                            {
+                                let input: web_sys::HtmlInputElement = event_target(&_ev);
+                                if let Some(file) = input.files().and_then(|files| files.get(0)) {
+                                    read_file_as_bytes(
+                                        file,
+                                        move |result| match result {
+                                            Ok(pdf_bytes) => {
+                                                extract_action
+                                                    .dispatch(ExtractStatementPdf {
+                                                        pdf_bytes,
+                                                        statement_year: Some(
+                                                            statement_year.get(),
+                                                        ),
+                                                    });
+                                            }
+                                            Err(message) => file_error.set(Some(message)),
+                                        },
+                                    );
+                                }
+                                input.set_value("");
+                            }
+                        }
+                    />
+                </div>
+                <FormError message=file_read_error />
+
+                <Show when=move || reviewing.get() fallback=|| ()>
+                    <Suspense fallback=|| view! { <p class="loading">"Loading…"</p> }>
+                        {move || {
+                            pick_lists
+                                .get()
+                                .map(|result| match result {
+                                    Err(err) => {
+                                        view! { <p class="form-error">{server_error_message(&err)}</p> }
+                                            .into_any()
+                                    }
+                                    Ok((category_list, merchant_list)) => {
+                                        view! {
+                                            {(!extraction_rejected.get().is_empty())
+                                                .then(|| {
+                                                    view! {
+                                                        <p class="field-note">
+                                                            "Some rows could not be read and are not shown below:"
+                                                        </p>
+                                                        <ul class="import-rejections">
+                                                            {extraction_rejected
+                                                                .get()
+                                                                .into_iter()
+                                                                .map(|row| {
+                                                                    view! {
+                                                                        <li>
+                                                                            {format!("Row {}: {}", row.row_number, row.reason)}
+                                                                        </li>
+                                                                    }
+                                                                })
+                                                                .collect_view()}
+                                                        </ul>
+                                                    }
+                                                })}
+                                            <ScrollableTable caption="Extracted transactions, ready for review">
+                                                <thead>
+                                                    <tr>
+                                                        <th scope="col">"Description"</th>
+                                                        <th scope="col">"Date"</th>
+                                                        <th scope="col">"Amount"</th>
+                                                        <th scope="col">"Merchant"</th>
+                                                        <th scope="col">"Category"</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    <For
+                                                        each=move || review_rows.get()
+                                                        key=|row| row.row_number
+                                                        children={
+                                                            let category_list = category_list.clone();
+                                                            let merchant_list = merchant_list.clone();
+                                                            move |row: ReviewRow| {
+                                                                let row_number = row.row_number;
+                                                                let merchant_defaults = merchant_list.clone();
+                                                                let category_id = row.category_id;
+                                                                let merchant_id = row.merchant_id;
+                                                                view! {
+                                                                    <tr>
+                                                                        <td>{row.description.clone()}</td>
+                                                                        <td>
+                                                                            <input
+                                                                                type="date"
+                                                                                aria-label=format!(
+                                                                                    "Date for row {row_number}",
+                                                                                )
+                                                                                prop:value=move || row.booking_date.get()
+                                                                                on:input=move |ev| row
+                                                                                    .booking_date
+                                                                                    .set(event_target_value(&ev))
+                                                                            />
+                                                                        </td>
+                                                                        <td>
+                                                                            <input
+                                                                                type="text"
+                                                                                aria-label=format!(
+                                                                                    "Amount for row {row_number}",
+                                                                                )
+                                                                                prop:value=move || row.amount.get()
+                                                                                on:input=move |ev| row
+                                                                                    .amount
+                                                                                    .set(event_target_value(&ev))
+                                                                            />
+                                                                        </td>
+                                                                        <td>
+                                                                            <select
+                                                                                aria-label=format!(
+                                                                                    "Merchant for row {row_number}",
+                                                                                )
+                                                                                prop:value=move || merchant_id.get()
+                                                                                on:change=move |ev| {
+                                                                                    let picked = event_target_value(&ev);
+                                                                                    if let Some(default) = merchant_defaults
+                                                                                        .iter()
+                                                                                        .find(|merchant| merchant.id == picked)
+                                                                                        .and_then(|merchant| {
+                                                                                            merchant.default_category_id.clone()
+                                                                                        })
+                                                                                    {
+                                                                                        if category_id.get().is_empty() {
+                                                                                            category_id.set(default);
+                                                                                        }
+                                                                                    }
+                                                                                    merchant_id.set(picked);
+                                                                                }
+                                                                            >
+                                                                                <option value="">"None"</option>
+                                                                                {merchant_list
+                                                                                    .iter()
+                                                                                    .map(|merchant| {
+                                                                                        view! {
+                                                                                            <option value=merchant.id.clone()>
+                                                                                                {merchant.merchant_name.clone()}
+                                                                                            </option>
+                                                                                        }
+                                                                                    })
+                                                                                    .collect_view()}
+                                                                            </select>
+                                                                        </td>
+                                                                        <td>
+                                                                            <select
+                                                                                aria-label=format!(
+                                                                                    "Category for row {row_number}",
+                                                                                )
+                                                                                prop:value=move || category_id.get()
+                                                                                on:change=move |ev| category_id
+                                                                                    .set(event_target_value(&ev))
+                                                                            >
+                                                                                <option value="">"None"</option>
+                                                                                {category_list
+                                                                                    .iter()
+                                                                                    .map(|category| {
+                                                                                        view! {
+                                                                                            <option value=category.id.clone()>
+                                                                                                {format!(
+                                                                                                    "{} ({})",
+                                                                                                    category.category_name,
+                                                                                                    category.kind.label(),
+                                                                                                )}
+                                                                                            </option>
+                                                                                        }
+                                                                                    })
+                                                                                    .collect_view()}
+                                                                            </select>
+                                                                        </td>
+                                                                    </tr>
+                                                                }
+                                                            }
+                                                        }
+                                                    />
+                                                </tbody>
+                                            </ScrollableTable>
+                                        }
+                                            .into_any()
+                                    }
+                                })
+                        }}
+                    </Suspense>
+                    <FormError message=confirm_error />
+                    <div class="form-actions">
+                        <button
+                            type="button"
+                            class="btn"
+                            disabled=move || confirm_action.pending().get()
+                            on:click=move |_| {
+                                let rows = review_rows
+                                    .get()
+                                    .iter()
+                                    .map(ReviewRow::to_confirmed)
+                                    .collect();
+                                confirm_action.dispatch(ConfirmStatementImport {
+                                    account_id: account_id.get_value(),
+                                    rows,
+                                });
+                            }
+                        >
+                            "Confirm import"
+                        </button>
+                    </div>
+                </Show>
+
+                {move || {
+                    confirm_action
                         .value()
                         .get()
                         .and_then(|result| result.ok())

@@ -47,7 +47,11 @@ serde_json = { version = "1", optional = true, features = ["raw_value"] }
 # Server-only: parsing CSV transaction-import uploads.
 csv = { version = "1", optional = true }
 
-# Hydrate-only: reading an uploaded CSV file's contents in the browser
+# Server-only: parsing bank-statement PDF uploads locally (no external
+# API/LLM call -- see src/server/CLAUDE.md). Born-digital PDFs only, no OCR.
+pdf-extract = { version = "0.12", optional = true }
+
+# Hydrate-only: reading an uploaded CSV/PDF file's contents in the browser
 # (src/pages/ledger.rs). The crate itself is already pulled in transitively by
 # `leptos`/`tachys` (which already request e.g. HtmlInputElement/Event);
 # declared directly here only to request the File-reading features nothing
@@ -58,12 +62,18 @@ web-sys = { version = "0.3", optional = true, features = [
   "FileReader",
 ] }
 
+# Hydrate-only: converting an uploaded PDF's bytes for the statement-import
+# upload (src/pages/ledger.rs). `FileReader::read_as_array_buffer` yields a
+# `js_sys::ArrayBuffer`; `Uint8Array` copies it out as a `Vec<u8>`.
+js-sys = { version = "0.3", optional = true }
+
 [features]
 hydrate = [
   "leptos/hydrate",
   "dep:console_error_panic_hook",
   "dep:wasm-bindgen",
   "dep:web-sys",
+  "dep:js-sys",
 ]
 ssr = [
   "dep:axum",
@@ -77,6 +87,7 @@ ssr = [
   "dep:reqwest",
   "dep:serde_json",
   "dep:csv",
+  "dep:pdf-extract",
   "leptos/ssr",
   "leptos_meta/ssr",
   "leptos_router/ssr",

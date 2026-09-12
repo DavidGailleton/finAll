@@ -12,7 +12,7 @@ use crate::transactions::types::TransactionPage;
 /// Parse an optional id form field: a blank value is `None`, otherwise it must
 /// be a valid UUID. Ownership of the referenced row is enforced server-side.
 #[cfg(feature = "ssr")]
-fn parse_optional_id(
+pub(crate) fn parse_optional_id(
     value: &str,
     message: &'static str,
 ) -> Result<Option<sqlx::types::Uuid>, crate::server::transactions::TransactionError> {
@@ -232,6 +232,128 @@ pub async fn import_transactions(
 
     let outcome =
         transaction_import::import_csv(&pool, &cache, user.user_id, account_id, &csv_content)
+            .await?;
+
+    Ok(ImportSummary {
+        imported: outcome.imported,
+        rejected: outcome
+            .rejected
+            .into_iter()
+            .map(|row| ImportRowError {
+                row_number: row.row_number,
+                reason: row.reason,
+            })
+            .collect(),
+    })
+}
+
+/// Extract candidate transaction rows from an uploaded bank-statement PDF for
+/// review -- nothing is written to the database. Only born-digital Deblock
+/// statements are currently supported (no OCR, no scanned statements).
+/// `suggested_merchant_id` is filled in only when a row's extracted
+/// counterparty text case-insensitively exact-matches one of the user's
+/// active merchants; category is never suggested.
+#[server]
+pub async fn extract_statement_pdf(
+    pdf_bytes: Vec<u8>,
+    /// Only needed for an English-language statement, whose dates never
+    /// print a year anywhere in the file; ignored for a French one. Blank
+    /// means "not supplied".
+    statement_year: Option<String>,
+) -> Result<crate::transactions::types::StatementExtractionDto, ServerFnError> {
+    use crate::server::auth::extract;
+    use crate::server::statement_import::{self, StatementImportError};
+    use crate::transactions::types::{ExtractedRowDto, ImportRowError, StatementExtractionDto};
+
+    let pool = expect_context::<sqlx::PgPool>();
+
+    let user = extract::current_user(&pool)
+        .await?
+        .ok_or(StatementImportError::Unauthorized)?;
+
+    let statement_year = statement_year
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value
+                .parse::<i32>()
+                .map_err(|_| StatementImportError::InvalidInput("statement year must be a number"))
+        })
+        .transpose()?;
+
+    let extraction =
+        statement_import::extract_deblock_rows(&pool, user.user_id, &pdf_bytes, statement_year)
+            .await?;
+
+    Ok(StatementExtractionDto {
+        rows: extraction
+            .rows
+            .into_iter()
+            .map(|row| ExtractedRowDto {
+                row_number: row.row_number,
+                booking_date: row.booking_date.to_string(),
+                value_date: Some(row.value_date.to_string()),
+                amount: row.amount.to_string(),
+                description: row.description,
+                suggested_merchant_id: row.suggested_merchant_id.map(|id| id.to_string()),
+                suggested_merchant_name: row.suggested_merchant_name,
+            })
+            .collect(),
+        rejected: extraction
+            .rejected
+            .into_iter()
+            .map(|row| ImportRowError {
+                row_number: row.row_number,
+                reason: row.reason,
+            })
+            .collect(),
+    })
+}
+
+/// Insert reviewed rows from a previously extracted statement PDF onto one of
+/// the current user's accounts, exactly like [`create_transaction`] (through
+/// [`transactions::create`]) -- every field is re-validated server-side,
+/// nothing from the extraction step is trusted merely because it was shown
+/// to the user. A row that fails is skipped and reported in
+/// `ImportSummary::rejected` rather than aborting the rest.
+#[server]
+pub async fn confirm_statement_import(
+    account_id: String,
+    rows: Vec<crate::transactions::types::ConfirmedRowDto>,
+) -> Result<crate::transactions::types::ImportSummary, ServerFnError> {
+    use std::sync::Arc;
+
+    use sqlx::types::Uuid;
+
+    use crate::server::assets::fx_cache::FxRateCache;
+    use crate::server::auth::extract;
+    use crate::server::statement_import::{self, ConfirmedRowInput, StatementImportError};
+    use crate::transactions::types::{ImportRowError, ImportSummary};
+
+    let pool = expect_context::<sqlx::PgPool>();
+    let cache = expect_context::<Arc<FxRateCache>>();
+
+    let user = extract::current_user(&pool)
+        .await?
+        .ok_or(StatementImportError::Unauthorized)?;
+
+    let account_id = Uuid::parse_str(&account_id)
+        .map_err(|_| StatementImportError::InvalidInput("invalid account id"))?;
+
+    let rows = rows
+        .into_iter()
+        .map(|row| ConfirmedRowInput {
+            booking_date: row.booking_date,
+            value_date: row.value_date,
+            amount: row.amount,
+            category_id: row.category_id,
+            merchant_id: row.merchant_id,
+        })
+        .collect();
+
+    let outcome =
+        statement_import::insert_confirmed_rows(&pool, &cache, user.user_id, account_id, rows)
             .await?;
 
     Ok(ImportSummary {

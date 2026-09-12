@@ -19,8 +19,8 @@ use crate::components::{
 };
 use crate::pages::guard::RequireAuth;
 use crate::pages::ledger::{
-    AccountContext, AddTransactionForm, ImportTransactionsForm, LedgerActions, LedgerFilter,
-    LedgerTable,
+    AccountContext, AddTransactionForm, ImportStatementForm, ImportTransactionsForm, LedgerActions,
+    LedgerFilter, LedgerTable,
 };
 use crate::pages::server_error_message;
 
@@ -364,6 +364,7 @@ fn AccountDetail() -> impl IntoView {
                 ledger_actions.update_transaction.version().get(),
                 ledger_actions.delete_transaction.version().get(),
                 ledger_actions.import_transactions.version().get(),
+                ledger_actions.confirm_statement_import.version().get(),
                 ledger_actions.link_transfer.version().get(),
                 ledger_actions.unlink_transfer.version().get(),
             )
@@ -517,6 +518,7 @@ fn TransactionsList(
         account_type,
     };
     let import_account_id = account_id.clone();
+    let statement_account_id = account_id.clone();
     let filter_account_id = account_id;
     let filter = LedgerFilter {
         account_id: Signal::derive(move || filter_account_id.clone()),
@@ -530,6 +532,11 @@ fn TransactionsList(
             <ImportTransactionsForm
                 account_id=import_account_id
                 action=actions.import_transactions
+            />
+            <ImportStatementForm
+                account_id=statement_account_id
+                extract_action=actions.extract_statement_pdf
+                confirm_action=actions.confirm_statement_import
             />
         </div>
         <LedgerTable filter=filter show_account=false actions=actions />

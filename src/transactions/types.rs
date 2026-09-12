@@ -79,21 +79,61 @@ pub struct TransactionPage {
     pub next_cursor: Option<String>,
 }
 
-/// One CSV row a transaction import could not insert, and why.
+/// One row a transaction import (CSV or PDF statement) could not insert, and
+/// why.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ImportRowError {
-    /// 1-based, counting the header as row 1 (so the first data row is 2) --
-    /// matches what a spreadsheet program shows.
+    /// 1-based. For the CSV import this counts the header as row 1 (so the
+    /// first data row is 2), matching what a spreadsheet program shows; for
+    /// a PDF statement import it numbers the extracted rows sequentially.
     pub row_number: usize,
     pub reason: String,
 }
 
-/// The outcome of a CSV transaction import: rows inserted, plus every row
-/// that was rejected, in file order. A structurally broken file (no usable
-/// header) is a hard error instead -- this only reports per-row outcomes for
-/// a file that was readable at all.
+/// The outcome of a transaction import (CSV or PDF statement): rows
+/// inserted, plus every row that was rejected, in file order. A structurally
+/// broken file (no usable header/layout) is a hard error instead -- this
+/// only reports per-row outcomes for a file that was readable at all.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ImportSummary {
     pub imported: usize,
     pub rejected: Vec<ImportRowError>,
+}
+
+/// One row extracted from an uploaded bank-statement PDF, awaiting review.
+/// `description` is the bank's raw text for that row, shown only as a
+/// read-only hint in the review UI -- it is never sent back to
+/// `confirm_statement_import` and is never persisted (transactions have no
+/// free-text description field). `suggested_merchant_id`/`_name` are only a
+/// pre-fill; the user can change or clear them before confirming.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ExtractedRowDto {
+    pub row_number: usize,
+    pub booking_date: String,
+    pub value_date: Option<String>,
+    pub amount: String,
+    pub description: String,
+    pub suggested_merchant_id: Option<String>,
+    pub suggested_merchant_name: Option<String>,
+}
+
+/// The outcome of extracting a statement PDF: rows ready for review, plus
+/// any row the parser could not understand. A structurally unrecognized file
+/// is a hard error instead (see `extract_statement_pdf`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StatementExtractionDto {
+    pub rows: Vec<ExtractedRowDto>,
+    pub rejected: Vec<ImportRowError>,
+}
+
+/// One reviewed row sent back for insertion, shaped like
+/// [`crate::transactions::api::create_transaction`]'s own fields (a blank id
+/// means none).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ConfirmedRowDto {
+    pub booking_date: String,
+    pub value_date: Option<String>,
+    pub amount: String,
+    pub category_id: String,
+    pub merchant_id: String,
 }

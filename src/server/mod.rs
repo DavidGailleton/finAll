@@ -12,6 +12,7 @@ pub mod income_expense;
 pub mod merchants;
 pub mod net_worth;
 pub mod seed;
+pub mod statement_import;
 pub mod transaction_import;
 pub mod transactions;
 pub mod transfers;
