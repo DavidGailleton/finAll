@@ -20,9 +20,9 @@ use crate::merchants::api::list_merchants;
 use crate::merchants::types::MerchantDto;
 use crate::pages::server_error_message;
 use crate::transactions::api::{
-    list_transactions, CreateTransaction, DeleteTransaction, UpdateTransaction,
+    list_transactions, CreateTransaction, DeleteTransaction, ImportTransactions, UpdateTransaction,
 };
-use crate::transactions::types::TransactionDto;
+use crate::transactions::types::{ImportSummary, TransactionDto};
 use crate::transfers::api::{paired_transaction_options, LinkTransfer, UnlinkTransfer};
 
 /// `"2026-01-05"` → `"January 5, 2026"`; the raw string back on any parse failure.
@@ -131,6 +131,7 @@ pub struct LedgerActions {
     pub create_transaction: ServerAction<CreateTransaction>,
     pub update_transaction: ServerAction<UpdateTransaction>,
     pub delete_transaction: ServerAction<DeleteTransaction>,
+    pub import_transactions: ServerAction<ImportTransactions>,
     pub link_transfer: ServerAction<LinkTransfer>,
     pub unlink_transfer: ServerAction<UnlinkTransfer>,
 }
@@ -141,6 +142,7 @@ impl LedgerActions {
             create_transaction: ServerAction::new(),
             update_transaction: ServerAction::new(),
             delete_transaction: ServerAction::new(),
+            import_transactions: ServerAction::new(),
             link_transfer: ServerAction::new(),
             unlink_transfer: ServerAction::new(),
         }
@@ -186,6 +188,7 @@ pub fn LedgerTable(
                 actions.create_transaction.version().get(),
                 actions.update_transaction.version().get(),
                 actions.delete_transaction.version().get(),
+                actions.import_transactions.version().get(),
                 actions.link_transfer.version().get(),
                 actions.unlink_transfer.version().get(),
             )
@@ -1054,6 +1057,188 @@ pub fn AddTransactionForm(
                             })
                     }}
                 </Suspense>
+            </Show>
+        </div>
+    }
+}
+
+/// A `FnOnce` file-read callback that may be delivered from either of two
+/// places (see [`read_file_as_text`]), shared via `Rc<RefCell<Option<_>>>` so
+/// it is taken out and called exactly once no matter which path fires.
+#[cfg(feature = "hydrate")]
+type FileReadCallback =
+    std::rc::Rc<std::cell::RefCell<Option<Box<dyn FnOnce(Result<String, String>)>>>>;
+
+/// Read `file`'s contents as UTF-8 text and call `on_result` once with the
+/// outcome. Only ever invoked from the browser -- this whole function is
+/// hydrate-only, since reading a `File` needs `web_sys::FileReader`, which
+/// this crate only depends on under the `hydrate` feature (see `Cargo.toml`).
+#[cfg(feature = "hydrate")]
+fn read_file_as_text(
+    file: web_sys::File,
+    on_result: impl FnOnce(Result<String, String>) + 'static,
+) {
+    use wasm_bindgen::closure::Closure;
+    use wasm_bindgen::JsCast;
+
+    let on_result: FileReadCallback =
+        std::rc::Rc::new(std::cell::RefCell::new(Some(Box::new(on_result))));
+
+    let deliver = {
+        let on_result = on_result.clone();
+        move |result: Result<String, String>| {
+            if let Some(on_result) = on_result.borrow_mut().take() {
+                on_result(result);
+            }
+        }
+    };
+
+    let reader = match web_sys::FileReader::new() {
+        Ok(reader) => reader,
+        Err(_) => return deliver(Err("could not read the selected file".to_owned())),
+    };
+
+    let reader_for_load = reader.clone();
+    let deliver_for_load = deliver.clone();
+    let onload = Closure::once(move |_event: web_sys::Event| {
+        let result = match reader_for_load.result() {
+            Ok(value) => value
+                .as_string()
+                .ok_or_else(|| "the selected file is not a text file".to_owned()),
+            Err(_) => Err("could not read the selected file".to_owned()),
+        };
+        deliver_for_load(result);
+    });
+    reader.set_onload(Some(onload.as_ref().unchecked_ref()));
+    onload.forget();
+
+    if reader.read_as_text(&file).is_err() {
+        deliver(Err("could not read the selected file".to_owned()));
+    }
+}
+
+/// The account's "Import CSV" section: a file input that reads the picked
+/// file's text client-side and dispatches [`ImportTransactions`] as soon as
+/// it's read -- no `<ActionForm>`, since there is nothing to submit beyond the
+/// file itself (mirrors `PairedTransactionField`'s `.dispatch()` on
+/// `on:change`, above).
+#[component]
+pub fn ImportTransactionsForm(
+    account_id: String,
+    action: ServerAction<ImportTransactions>,
+) -> impl IntoView {
+    let importing = RwSignal::new(false);
+    let file_error = RwSignal::new(None::<String>);
+
+    let error = Signal::derive(move || {
+        file_error.get().or_else(|| match action.value().get() {
+            Some(Err(err)) => Some(server_error_message(&err)),
+            _ => None,
+        })
+    });
+
+    view! {
+        <div class="disclosure add-form">
+            <Show
+                when=move || importing.get()
+                fallback=move || {
+                    view! {
+                        <button
+                            type="button"
+                            class="btn btn--secondary"
+                            aria-expanded="false"
+                            on:click=move |_| importing.set(true)
+                        >
+                            "Import CSV"
+                        </button>
+                    }
+                }
+            >
+                <p class="field-note">
+                    "CSV columns: date (YYYY-MM-DD), amount, category, merchant. Category and merchant are optional and must match an existing name."
+                </p>
+                <div class="field">
+                    <label for="import_file">"CSV file"</label>
+                    <input
+                        id="import_file"
+                        type="file"
+                        accept=".csv,text/csv"
+                        on:change={
+                            let account_id = account_id.clone();
+                            move |_ev| {
+                                file_error.set(None);
+                                #[cfg(feature = "hydrate")]
+                                {
+                                    let input: web_sys::HtmlInputElement = event_target(&_ev);
+                                    if let Some(file) = input.files().and_then(|files| files.get(0))
+                                    {
+                                        let account_id = account_id.clone();
+                                        read_file_as_text(
+                                            file,
+                                            move |result| match result {
+                                                Ok(csv_content) => {
+                                                    action
+                                                        .dispatch(ImportTransactions {
+                                                            account_id,
+                                                            csv_content,
+                                                        });
+                                                }
+                                                Err(message) => file_error.set(Some(message)),
+                                            },
+                                        );
+                                    }
+                                    input.set_value("");
+                                }
+                                #[cfg(not(feature = "hydrate"))]
+                                {
+                                    // No `web_sys::File`/`FileReader` on the
+                                    // server target -- this input is inert
+                                    // during SSR.
+                                    let _ = &account_id;
+                                }
+                            }
+                        }
+                    />
+                </div>
+                <FormError message=error />
+                {move || {
+                    action
+                        .value()
+                        .get()
+                        .and_then(|result| result.ok())
+                        .map(|summary: ImportSummary| {
+                            view! {
+                                <p class="field-note">
+                                    {format!("Imported {} transaction(s).", summary.imported)}
+                                </p>
+                                {(!summary.rejected.is_empty())
+                                    .then(|| {
+                                        view! {
+                                            <ul class="import-rejections">
+                                                {summary
+                                                    .rejected
+                                                    .into_iter()
+                                                    .map(|row| {
+                                                        view! {
+                                                            <li>
+                                                                {format!("Row {}: {}", row.row_number, row.reason)}
+                                                            </li>
+                                                        }
+                                                    })
+                                                    .collect_view()}
+                                            </ul>
+                                        }
+                                    })}
+                            }
+                        })
+                }}
+                <button
+                    type="button"
+                    class="btn btn--secondary btn--small"
+                    on:click=move |_| importing.set(false)
+                >
+                    "Close"
+                </button>
             </Show>
         </div>
     }

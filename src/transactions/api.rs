@@ -194,6 +194,59 @@ pub async fn update_transaction(
     Ok(())
 }
 
+/// Import transactions from a CSV file onto one of the current user's
+/// accounts. Every row is validated and inserted exactly like
+/// [`create_transaction`] (through the same [`transactions::create`]); a row
+/// that fails is skipped and reported in `ImportSummary::rejected` rather than
+/// aborting the whole import. Every imported row is recorded in the account's
+/// own default currency -- a CSV row cannot record a foreign-currency
+/// transaction.
+///
+/// Expected columns (header row required, case-insensitive names): `date`
+/// (`YYYY-MM-DD`, required), `amount` (signed decimal, required), `category`
+/// (name of an existing category, optional), `merchant` (name of an existing
+/// merchant, optional).
+#[server]
+pub async fn import_transactions(
+    account_id: String,
+    csv_content: String,
+) -> Result<crate::transactions::types::ImportSummary, ServerFnError> {
+    use std::sync::Arc;
+
+    use sqlx::types::Uuid;
+
+    use crate::server::assets::fx_cache::FxRateCache;
+    use crate::server::auth::extract;
+    use crate::server::transaction_import::{self, TransactionImportError};
+    use crate::transactions::types::{ImportRowError, ImportSummary};
+
+    let pool = expect_context::<sqlx::PgPool>();
+    let cache = expect_context::<Arc<FxRateCache>>();
+
+    let user = extract::current_user(&pool)
+        .await?
+        .ok_or(TransactionImportError::Unauthorized)?;
+
+    let account_id = Uuid::parse_str(&account_id)
+        .map_err(|_| TransactionImportError::InvalidInput("invalid account id"))?;
+
+    let outcome =
+        transaction_import::import_csv(&pool, &cache, user.user_id, account_id, &csv_content)
+            .await?;
+
+    Ok(ImportSummary {
+        imported: outcome.imported,
+        rejected: outcome
+            .rejected
+            .into_iter()
+            .map(|row| ImportRowError {
+                row_number: row.row_number,
+                reason: row.reason,
+            })
+            .collect(),
+    })
+}
+
 /// Soft-delete one of the current user's transactions.
 #[server]
 pub async fn delete_transaction(id: String) -> Result<(), ServerFnError> {

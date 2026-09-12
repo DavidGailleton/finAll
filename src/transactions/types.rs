@@ -78,3 +78,22 @@ pub struct TransactionPage {
     pub transactions: Vec<TransactionDto>,
     pub next_cursor: Option<String>,
 }
+
+/// One CSV row a transaction import could not insert, and why.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ImportRowError {
+    /// 1-based, counting the header as row 1 (so the first data row is 2) --
+    /// matches what a spreadsheet program shows.
+    pub row_number: usize,
+    pub reason: String,
+}
+
+/// The outcome of a CSV transaction import: rows inserted, plus every row
+/// that was rejected, in file order. A structurally broken file (no usable
+/// header) is a hard error instead -- this only reports per-row outcomes for
+/// a file that was readable at all.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ImportSummary {
+    pub imported: usize,
+    pub rejected: Vec<ImportRowError>,
+}

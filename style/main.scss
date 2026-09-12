@@ -1668,6 +1668,13 @@ legend {
 	color: var(--text-secondary);
 }
 
+.import-rejections {
+	margin: 0;
+	padding-left: var(--s4);
+	font-size: var(--fs-xs);
+	color: var(--text-secondary);
+}
+
 .filters {
 	display: flex;
 	flex-wrap: wrap;
