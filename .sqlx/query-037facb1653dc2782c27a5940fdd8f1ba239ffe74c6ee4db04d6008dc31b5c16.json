@@ -1,0 +1,75 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT\n            acc.default_asset_id AS \"account_asset_id!\",\n            acc_ccy.code AS \"account_currency_code!\",\n            t.booking_date,\n            sum(t.account_amount) FILTER (WHERE t.account_amount > 0) AS \"income_subtotal?\",\n            sum(t.account_amount) FILTER (WHERE t.account_amount < 0) AS \"expense_subtotal?\",\n            bool_or(t.account_amount IS NULL) AS \"pending!\"\n        FROM transactions AS t\n        INNER JOIN accounts AS acc ON acc.user_id = t.user_id AND acc.id = t.account_id\n        INNER JOIN assets AS acc_ccy ON acc_ccy.id = acc.default_asset_id\n        WHERE\n            t.user_id = $1\n            AND t.deleted_at IS NULL\n            AND acc.deleted_at IS NULL\n            AND t.booking_date >= $2\n            AND t.booking_date <= $3\n            AND NOT EXISTS (\n                SELECT 1\n                FROM transfers AS tr\n                WHERE\n                    tr.user_id = t.user_id\n                    AND (\n                        tr.source_transaction_id = t.id\n                        OR tr.destination_transaction_id = t.id\n                    )\n                    AND tr.deleted_at IS NULL\n            )\n        GROUP BY acc.default_asset_id, acc_ccy.code, t.booking_date\n        ORDER BY t.booking_date\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "account_asset_id!",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "accounts",
+            "name": "default_asset_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "account_currency_code!",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "assets",
+            "name": "code"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "booking_date",
+        "type_info": "Date",
+        "origin": {
+          "Table": {
+            "table": "transactions",
+            "name": "booking_date"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "income_subtotal?",
+        "type_info": "Numeric",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "expense_subtotal?",
+        "type_info": "Numeric",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
+        "name": "pending!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Date",
+        "Date"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "037facb1653dc2782c27a5940fdd8f1ba239ffe74c6ee4db04d6008dc31b5c16"
+}
