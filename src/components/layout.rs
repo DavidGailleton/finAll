@@ -60,14 +60,6 @@ pub fn Layout(children: Children) -> impl IntoView {
             <aside class="accounts-sidebar" aria-label="Accounts">
                 <div class="accounts-sidebar__head">
                     <h2>"Accounts"</h2>
-                    <button
-                        type="button"
-                        class="btn btn--icon"
-                        aria-label="Hide accounts sidebar"
-                        on:click=move |_| sidebar_hidden.set(true)
-                    >
-                        <Icon name="panel-left" size="sm" />
-                    </button>
                 </div>
                 <AccountsSidebar />
                 {who.map(|who| view! { <p class="field-note">{who}</p> })}

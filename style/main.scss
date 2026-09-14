@@ -595,12 +595,17 @@ button {
 .acct-row__sub {
 	font-size: var(--fs-sm);
 	color: var(--text-secondary);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
 }
 
 .acct-row__bal {
 	font-size: var(--fs-sm);
 	font-weight: 500;
 	white-space: nowrap;
+	text-align: right;
+	flex-shrink: 0;
 }
 
 // --- main ---
