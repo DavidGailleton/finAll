@@ -3,12 +3,15 @@ pub mod app;
 pub mod assets;
 pub mod auth;
 pub mod balances;
+pub mod cashflow;
 pub mod categories;
 pub mod components;
 pub mod income_expense;
 pub mod merchants;
+pub mod money_flow;
 pub mod net_worth;
 pub mod pages;
+pub mod periods;
 pub mod transactions;
 pub mod transfers;
 

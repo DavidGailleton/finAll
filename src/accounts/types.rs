@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 /// The kind of an account. The variants are exactly the values allowed by the
 /// `accounts_type_valid` check constraint; they serialize as those lowercase
 /// strings both across the server-function boundary and in the database.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AccountType {
     Cash,
@@ -65,6 +65,39 @@ impl AccountType {
             AccountType::Other => "Other",
         }
     }
+
+    /// Where this account type sits on the balance sheet: `Credit` and `Loan`
+    /// are liabilities, everything else is an asset. Used only to group the net
+    /// worth report — it does not affect the net worth total, which stays the
+    /// sum of every account's signed balance regardless of classification.
+    pub fn classification(&self) -> Classification {
+        match self {
+            AccountType::Credit | AccountType::Loan => Classification::Liability,
+            AccountType::Cash
+            | AccountType::Bank
+            | AccountType::Investment
+            | AccountType::Crypto
+            | AccountType::Other => Classification::Asset,
+        }
+    }
+}
+
+/// The balance-sheet side an account type belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Classification {
+    Asset,
+    Liability,
+}
+
+impl Classification {
+    /// A capitalized label for display in the UI.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Classification::Asset => "Assets",
+            Classification::Liability => "Liabilities",
+        }
+    }
 }
 
 /// An account, in the shape the browser is allowed to see.
@@ -97,5 +130,16 @@ mod tests {
         assert_eq!(AccountType::from_db_str("savings"), None);
         assert_eq!(AccountType::from_db_str(""), None);
         assert_eq!(AccountType::from_db_str("Cash"), None);
+    }
+
+    #[test]
+    fn only_credit_and_loan_are_liabilities() {
+        for variant in AccountType::ALL {
+            let expected = match variant {
+                AccountType::Credit | AccountType::Loan => Classification::Liability,
+                _ => Classification::Asset,
+            };
+            assert_eq!(variant.classification(), expected);
+        }
     }
 }

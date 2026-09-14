@@ -1,16 +1,17 @@
 //! The signed-in user's net worth: the sum of every account balance, valued in
-//! one chosen display currency, with a per-currency breakdown.
+//! one chosen display currency, broken down by balance-sheet classification
+//! (assets vs liabilities) and account type.
 //!
 //! `account_balances` (the SQL view) gives the exact, unconverted balance of
-//! each currency an account holds. This module re-aggregates those rows across
-//! all of a user's accounts into one signed position per currency, values each
-//! position in the display currency using a rate resolved by
-//! [`crate::server::assets::rates`], and sums them.
+//! each currency an account holds, already one row per account. This module
+//! values each row in the display currency using a rate resolved by
+//! [`crate::server::assets::rates`], sums them for the total, and groups the
+//! valued rows by [`AccountType::classification`] for the breakdown.
 //!
 //! Unlike [`crate::server::balances`], a currency with no resolvable rate does
 //! not fail the whole request: it becomes an unvalued line and is left out of
 //! the total, with the report marked incomplete. Nothing is silently combined
-//! or dropped — the excluded currencies stay visible in the breakdown.
+//! or dropped — the excluded accounts stay visible in the breakdown.
 //!
 //! Every query is scoped by `user_id` so one user can never read another's
 //! balances.
@@ -23,6 +24,7 @@ use sqlx::types::chrono::{DateTime, Utc};
 use sqlx::types::Uuid;
 use sqlx::PgPool;
 
+use crate::accounts::types::{AccountType, Classification};
 use crate::server::assets::conversion::{self, ConversionError};
 use crate::server::assets::currency::{self, CurrencyError};
 use crate::server::assets::fx_cache::FxRateCache;
@@ -86,16 +88,23 @@ pub struct DisplayCurrency {
     pub minor_units: i16,
 }
 
-/// One signed position: the sum of the user's balances in a single currency
-/// across every account (`account_balances` re-aggregated by asset).
+/// One account's signed balance in its own currency (`account_balances`, one
+/// row per account since an account is recorded in a single currency).
 pub struct Position {
+    pub account_id: Uuid,
+    pub account_name: String,
+    pub account_type: AccountType,
     pub asset_id: Uuid,
     pub currency_code: String,
     pub balance: BigDecimal,
 }
 
-/// One valued breakdown line, before it is rendered to strings for the DTO.
+/// One valued breakdown line — one account — before it is rendered to strings
+/// for the DTO.
 pub struct ValuedLine {
+    pub account_id: Uuid,
+    pub account_name: String,
+    pub account_type: AccountType,
     pub currency_code: String,
     pub amount: BigDecimal,
     pub converted_amount: Option<BigDecimal>,
@@ -112,13 +121,78 @@ pub struct PositionValuation {
     pub rates_as_of: Option<DateTime<Utc>>,
 }
 
-/// The whole report: the display currency plus its valued breakdown.
+/// One account type's accounts within a classification, with their combined
+/// (valued, partial-sum-safe) total.
+pub struct AccountGroup {
+    pub account_type: AccountType,
+    pub total: BigDecimal,
+    pub accounts: Vec<ValuedLine>,
+}
+
+/// One balance-sheet side (assets or liabilities), grouped further by account
+/// type.
+pub struct ClassificationGroup {
+    pub classification: Classification,
+    pub total: BigDecimal,
+    pub account_groups: Vec<AccountGroup>,
+}
+
+/// The whole report: the display currency, its total, and the classification
+/// breakdown.
 pub struct ValuedReport {
     pub display: DisplayCurrency,
-    pub lines: Vec<ValuedLine>,
+    pub classifications: Vec<ClassificationGroup>,
     pub total: BigDecimal,
     pub complete: bool,
     pub rates_as_of: Option<DateTime<Utc>>,
+}
+
+/// Group valued account lines by balance-sheet classification, then by
+/// account type, in [`AccountType::ALL`] order. A group's total is the sum of
+/// only its valued accounts (unvalued accounts still appear in `accounts`,
+/// matching the top-level total's own exclusion rule) so one missing rate
+/// never blocks the rest of the breakdown.
+fn group_by_classification(lines: Vec<ValuedLine>) -> Vec<ClassificationGroup> {
+    let mut by_type: HashMap<AccountType, Vec<ValuedLine>> = HashMap::new();
+    for line in lines {
+        by_type.entry(line.account_type).or_default().push(line);
+    }
+
+    [Classification::Asset, Classification::Liability]
+        .into_iter()
+        .map(|classification| {
+            let mut class_total = BigDecimal::zero();
+            let account_groups = AccountType::ALL
+                .into_iter()
+                .filter(|account_type| account_type.classification() == classification)
+                .filter_map(|account_type| {
+                    by_type
+                        .remove(&account_type)
+                        .map(|accounts| (account_type, accounts))
+                })
+                .map(|(account_type, accounts)| {
+                    let mut total = BigDecimal::zero();
+                    for account in &accounts {
+                        if let Some(converted) = &account.converted_amount {
+                            total += converted;
+                        }
+                    }
+                    class_total += &total;
+                    AccountGroup {
+                        account_type,
+                        total,
+                        accounts,
+                    }
+                })
+                .collect();
+
+            ClassificationGroup {
+                classification,
+                total: class_total,
+                account_groups,
+            }
+        })
+        .collect()
 }
 
 /// Value every `position` into `display`, reusing the pre-resolved rates in
@@ -144,6 +218,9 @@ pub fn value_positions(
         if position.asset_id == display.asset_id {
             total += &position.balance;
             lines.push(ValuedLine {
+                account_id: position.account_id,
+                account_name: position.account_name.clone(),
+                account_type: position.account_type,
                 currency_code: position.currency_code.clone(),
                 amount: position.balance.clone(),
                 converted_amount: Some(position.balance.clone()),
@@ -157,6 +234,9 @@ pub fn value_positions(
         let Some(resolved_rate) = resolved.get(&position.asset_id) else {
             complete = false;
             lines.push(ValuedLine {
+                account_id: position.account_id,
+                account_name: position.account_name.clone(),
+                account_type: position.account_type,
                 currency_code: position.currency_code.clone(),
                 amount: position.balance.clone(),
                 converted_amount: None,
@@ -184,6 +264,9 @@ pub fn value_positions(
         });
 
         lines.push(ValuedLine {
+            account_id: position.account_id,
+            account_name: position.account_name.clone(),
+            account_type: position.account_type,
             currency_code: position.currency_code.clone(),
             amount: position.balance.clone(),
             converted_amount: Some(converted.converted_amount),
@@ -213,7 +296,7 @@ pub async fn report(
 ) -> Result<ValuedReport, NetWorthError> {
     let code = currency::validate_alphabetic_code(display_currency_code)?;
     let display = display_currency(pool, &code).await?;
-    let positions = positions_for_user(pool, user_id).await?;
+    let positions = account_positions_for_user(pool, user_id).await?;
 
     let mut resolved: HashMap<Uuid, ResolvedRate> = HashMap::new();
     for position in &positions {
@@ -238,7 +321,7 @@ pub async fn report(
 
     Ok(ValuedReport {
         display,
-        lines: valuation.lines,
+        classifications: group_by_classification(valuation.lines),
         total: valuation.total,
         complete,
         rates_as_of: valuation.rates_as_of,
@@ -294,39 +377,56 @@ async fn display_currency(pool: &PgPool, code: &str) -> Result<DisplayCurrency, 
     })
 }
 
-/// The user's `account_balances` rows re-aggregated across all their accounts
-/// into one signed position per currency, ordered by currency code.
+/// The user's `account_balances` rows (already one per account), joined to
+/// each account's name and type, ordered by account name.
 ///
 /// `INNER JOIN fiat_assets` cannot drop a position today because
 /// `assets.asset_class` is constrained to `'fiat'`; a future non-fiat asset
 /// class would need a `LEFT JOIN` here plus an unvalued line for it.
-async fn positions_for_user(pool: &PgPool, user_id: Uuid) -> Result<Vec<Position>, NetWorthError> {
+async fn account_positions_for_user(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<Vec<Position>, NetWorthError> {
     let rows = sqlx::query!(
         r#"
         SELECT
+            ab.account_id AS "account_id!",
+            acc.account_name AS "account_name!",
+            acc.account_type AS "account_type!",
             ab.asset_id AS "asset_id!",
             a.code AS "currency_code!",
-            sum(ab.balance) AS "balance!"
+            ab.balance AS "balance!"
         FROM account_balances AS ab
         INNER JOIN assets AS a ON a.id = ab.asset_id
         INNER JOIN fiat_assets AS f ON f.asset_id = ab.asset_id
+        INNER JOIN accounts AS acc ON acc.id = ab.account_id AND acc.user_id = ab.user_id
         WHERE ab.user_id = $1
-        GROUP BY ab.asset_id, a.code
-        ORDER BY a.code
+        ORDER BY acc.account_name, a.code
         "#,
         user_id,
     )
     .fetch_all(pool)
     .await?;
 
-    Ok(rows
-        .into_iter()
-        .map(|row| Position {
-            asset_id: row.asset_id,
-            currency_code: row.currency_code,
-            balance: row.balance,
+    rows.into_iter()
+        .map(|row| {
+            let account_type = AccountType::from_db_str(&row.account_type).ok_or_else(|| {
+                logging::error!(
+                    "net worth: unknown account type {:?} in the database",
+                    row.account_type
+                );
+                NetWorthError::Internal
+            })?;
+            Ok(Position {
+                account_id: row.account_id,
+                account_name: row.account_name,
+                account_type,
+                asset_id: row.asset_id,
+                currency_code: row.currency_code,
+                balance: row.balance,
+            })
         })
-        .collect())
+        .collect()
 }
 
 #[cfg(test)]
@@ -362,7 +462,23 @@ mod tests {
     }
 
     fn position(asset_n: u128, code: &str, balance: &str) -> Position {
+        typed_position(asset_n, asset_n, AccountType::Bank, code, balance)
+    }
+
+    /// `account_n` and `asset_n` are separate ids on purpose: several accounts
+    /// can share one currency (`asset_n`), which is what makes the
+    /// classification-grouping tests below meaningful.
+    fn typed_position(
+        account_n: u128,
+        asset_n: u128,
+        account_type: AccountType,
+        code: &str,
+        balance: &str,
+    ) -> Position {
         Position {
+            account_id: asset(account_n),
+            account_name: format!("Account {account_n}"),
+            account_type,
             asset_id: asset(asset_n),
             currency_code: code.to_owned(),
             balance: dec(balance),
@@ -476,6 +592,62 @@ mod tests {
 
         assert_eq!(valuation.rates_as_of, Some(at(1_700_000_100)));
     }
+
+    #[test]
+    fn accounts_land_in_their_classification_and_group_totals_sum() {
+        // All four accounts share the EUR asset id (`eur()`'s asset(1)) so
+        // none of them is treated as an unvalued foreign position.
+        let positions = [
+            typed_position(101, 1, AccountType::Bank, "EUR", "100"),
+            typed_position(102, 1, AccountType::Cash, "EUR", "20"),
+            typed_position(103, 1, AccountType::Credit, "EUR", "-30"),
+            typed_position(104, 1, AccountType::Loan, "EUR", "-500"),
+        ];
+        let valuation = value_positions(&positions, &eur(), &HashMap::new()).expect("values");
+        let classifications = group_by_classification(valuation.lines);
+
+        let assets = classifications
+            .iter()
+            .find(|c| c.classification == Classification::Asset)
+            .expect("an asset classification");
+        assert_eq!(assets.total, dec("120"));
+        assert_eq!(assets.account_groups.len(), 2);
+        assert!(assets
+            .account_groups
+            .iter()
+            .any(|g| g.account_type == AccountType::Bank && g.total == dec("100")));
+        assert!(assets
+            .account_groups
+            .iter()
+            .any(|g| g.account_type == AccountType::Cash && g.total == dec("20")));
+
+        let liabilities = classifications
+            .iter()
+            .find(|c| c.classification == Classification::Liability)
+            .expect("a liability classification");
+        assert_eq!(liabilities.total, dec("-530"));
+        assert_eq!(liabilities.account_groups.len(), 2);
+    }
+
+    #[test]
+    fn an_unvalued_account_is_excluded_from_its_group_total_but_still_listed() {
+        let positions = [
+            typed_position(1, 1, AccountType::Bank, "EUR", "50"),
+            typed_position(2, 2, AccountType::Bank, "USD", "100"),
+        ];
+        let valuation = value_positions(&positions, &eur(), &HashMap::new()).expect("values");
+        let classifications = group_by_classification(valuation.lines);
+
+        let bank_group = classifications
+            .iter()
+            .flat_map(|c| &c.account_groups)
+            .find(|g| g.account_type == AccountType::Bank)
+            .expect("a bank group");
+        // Only the EUR account was valued; the unresolved USD one is excluded
+        // from the group total but still present in `accounts`.
+        assert_eq!(bank_group.total, dec("50"));
+        assert_eq!(bank_group.accounts.len(), 2);
+    }
 }
 
 #[cfg(test)]
@@ -511,10 +683,17 @@ mod db_tests {
             .await
             .expect("a report");
 
-        assert_eq!(report.lines.len(), 1);
         assert_eq!(report.total, dec("125.50"));
         assert!(report.complete);
         assert_eq!(report.rates_as_of, None);
+        let assets = report
+            .classifications
+            .iter()
+            .find(|c| c.classification == Classification::Asset)
+            .expect("an asset classification");
+        // One group per account type: Alice's Cash and Bank accounts.
+        assert_eq!(assets.account_groups.len(), 2);
+        assert_eq!(assets.total, dec("125.50"));
     }
 
     #[sqlx::test]
@@ -551,7 +730,10 @@ mod db_tests {
         let report = report(&pool, &fx_cache(), alice, "EUR")
             .await
             .expect("a report");
-        assert!(report.lines.is_empty());
+        assert!(report
+            .classifications
+            .iter()
+            .all(|c| c.account_groups.is_empty()));
         assert_eq!(report.total, dec("0"));
         assert!(report.complete);
     }

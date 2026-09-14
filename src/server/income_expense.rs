@@ -25,6 +25,7 @@ use sqlx::types::chrono::NaiveDate;
 use sqlx::types::Uuid;
 use sqlx::PgPool;
 
+use crate::accounts::types::AccountType;
 use crate::categories::types::CategoryKind;
 use crate::server::assets::conversion::{self, ConversionError};
 use crate::server::assets::currency::{self, CurrencyError};
@@ -336,6 +337,10 @@ pub fn summarise(subtotals: &[CategorySubtotal]) -> Result<Summary, IncomeExpens
 /// `display_currency_code`. Each transaction is valued at the rate on its own
 /// booking date (its account-currency amount, translated to the display
 /// currency).
+///
+/// `account_types`, when `Some`, restricts the transactions to accounts of
+/// those types only (e.g. the cashflow report's Bank+Cash scope); `None`
+/// covers every account, unchanged from this function's original behavior.
 pub async fn report(
     pool: &PgPool,
     cache: &FxRateCache,
@@ -343,11 +348,12 @@ pub async fn report(
     display_currency_code: &str,
     from: &str,
     to: &str,
+    account_types: Option<&[AccountType]>,
 ) -> Result<Report, IncomeExpenseError> {
     let code = currency::validate_alphabetic_code(display_currency_code)?;
     let (from, to) = parse_period(from, to)?;
     let display = display_currency(pool, &code).await?;
-    let dated = dated_subtotals(pool, user_id, from, to).await?;
+    let dated = dated_subtotals(pool, user_id, from, to, account_types).await?;
 
     let subtotals = value_subtotals(cache, &display, &dated).await?;
     let summary = summarise(&subtotals)?;
@@ -426,13 +432,22 @@ struct DatedSubtotal {
 /// Transfer legs are excluded with a `NOT EXISTS` anti-join. `categories` is
 /// joined without a `deleted_at` filter so a soft-deleted category's immutable
 /// `kind` still classifies its history; the name is blanked here to match the
-/// ledger.
+/// ledger. `account_types`, when `Some`, restricts to accounts of those types
+/// (`$4::text[] IS NULL` keeps every account when `None`).
 async fn dated_subtotals(
     pool: &PgPool,
     user_id: Uuid,
     from: NaiveDate,
     to: NaiveDate,
+    account_types: Option<&[AccountType]>,
 ) -> Result<Vec<DatedSubtotal>, IncomeExpenseError> {
+    let account_type_codes = account_types.map(|types| {
+        types
+            .iter()
+            .map(|t| t.as_db_str().to_owned())
+            .collect::<Vec<String>>()
+    });
+
     let rows = sqlx::query!(
         r#"
         SELECT
@@ -455,6 +470,7 @@ async fn dated_subtotals(
             AND acc.deleted_at IS NULL
             AND t.booking_date >= $2
             AND t.booking_date <= $3
+            AND ($4::text[] IS NULL OR acc.account_type = ANY($4::text[]))
             AND NOT EXISTS (
                 SELECT 1
                 FROM transfers AS tr
@@ -474,6 +490,7 @@ async fn dated_subtotals(
         user_id,
         from,
         to,
+        account_type_codes.as_deref(),
     )
     .fetch_all(pool)
     .await?;
@@ -929,9 +946,17 @@ mod db_tests {
         )
         .await;
 
-        let report = report(&pool, &fx_cache(), alice, "EUR", "2026-01-01", "2026-01-31")
-            .await
-            .expect("report");
+        let report = report(
+            &pool,
+            &fx_cache(),
+            alice,
+            "EUR",
+            "2026-01-01",
+            "2026-01-31",
+            None,
+        )
+        .await
+        .expect("report");
 
         assert_eq!(report.income_lines.len(), 1);
         assert_eq!(report.income_lines[0].converted_net, Some(dec("800")));
@@ -972,9 +997,17 @@ mod db_tests {
         )
         .await;
 
-        let report = report(&pool, &fx_cache(), alice, "EUR", "2026-03-01", "2026-03-31")
-            .await
-            .expect("report");
+        let report = report(
+            &pool,
+            &fx_cache(),
+            alice,
+            "EUR",
+            "2026-03-01",
+            "2026-03-31",
+            None,
+        )
+        .await
+        .expect("report");
 
         assert!(report.income_lines.is_empty());
         assert_eq!(report.expense_lines.len(), 1);
@@ -998,9 +1031,17 @@ mod db_tests {
         insert_transaction(&pool, alice, account.id, eur, "20", date(2026, 1, 31)).await;
         insert_transaction(&pool, alice, account.id, eur, "40", date(2026, 2, 1)).await;
 
-        let report = report(&pool, &fx_cache(), alice, "EUR", "2026-01-01", "2026-01-31")
-            .await
-            .expect("report");
+        let report = report(
+            &pool,
+            &fx_cache(),
+            alice,
+            "EUR",
+            "2026-01-01",
+            "2026-01-31",
+            None,
+        )
+        .await
+        .expect("report");
 
         // Only the two in-window rows (10 + 20) count, as one uncategorised line.
         assert_eq!(report.net, dec("30"));
@@ -1021,9 +1062,17 @@ mod db_tests {
 
         insert_transaction(&pool, alice, checking.id, eur, "1000", date(2026, 1, 2)).await;
 
-        let before = report(&pool, &fx_cache(), alice, "EUR", "2026-01-01", "2026-01-31")
-            .await
-            .expect("report");
+        let before = report(
+            &pool,
+            &fx_cache(),
+            alice,
+            "EUR",
+            "2026-01-01",
+            "2026-01-31",
+            None,
+        )
+        .await
+        .expect("report");
 
         let source =
             insert_transaction(&pool, alice, checking.id, eur, "-300", date(2026, 1, 10)).await;
@@ -1031,12 +1080,61 @@ mod db_tests {
             insert_transaction(&pool, alice, savings.id, eur, "300", date(2026, 1, 10)).await;
         insert_transfer(&pool, alice, source, destination).await;
 
-        let after = report(&pool, &fx_cache(), alice, "EUR", "2026-01-01", "2026-01-31")
-            .await
-            .expect("report");
+        let after = report(
+            &pool,
+            &fx_cache(),
+            alice,
+            "EUR",
+            "2026-01-01",
+            "2026-01-31",
+            None,
+        )
+        .await
+        .expect("report");
 
         assert_eq!(before.net, dec("1000"));
         assert_eq!(after.net, dec("1000"));
+    }
+
+    #[sqlx::test]
+    async fn an_account_type_filter_excludes_out_of_scope_accounts(pool: PgPool) {
+        let alice = create_user(&pool, "alice@example.test").await;
+        let eur = currency_id(&pool, "EUR").await;
+        let bank = accounts::create(&pool, alice, "Bank", "bank", eur)
+            .await
+            .expect("account");
+        let investment = accounts::create(&pool, alice, "Brokerage", "investment", eur)
+            .await
+            .expect("account");
+
+        insert_transaction(&pool, alice, bank.id, eur, "100", date(2026, 1, 5)).await;
+        insert_transaction(&pool, alice, investment.id, eur, "500", date(2026, 1, 6)).await;
+
+        let unfiltered = report(
+            &pool,
+            &fx_cache(),
+            alice,
+            "EUR",
+            "2026-01-01",
+            "2026-01-31",
+            None,
+        )
+        .await
+        .expect("report");
+        assert_eq!(unfiltered.net, dec("600"));
+
+        let bank_only = report(
+            &pool,
+            &fx_cache(),
+            alice,
+            "EUR",
+            "2026-01-01",
+            "2026-01-31",
+            Some(&[AccountType::Bank, AccountType::Cash]),
+        )
+        .await
+        .expect("report");
+        assert_eq!(bank_only.net, dec("100"));
     }
 
     #[sqlx::test]
@@ -1054,9 +1152,17 @@ mod db_tests {
         insert_transaction(&pool, alice, alices.id, eur, "100", date(2026, 1, 15)).await;
         insert_transaction(&pool, bob, bobs.id, eur, "777", date(2026, 1, 15)).await;
 
-        let report = report(&pool, &fx_cache(), alice, "EUR", "2026-01-01", "2026-01-31")
-            .await
-            .expect("report");
+        let report = report(
+            &pool,
+            &fx_cache(),
+            alice,
+            "EUR",
+            "2026-01-01",
+            "2026-01-31",
+            None,
+        )
+        .await
+        .expect("report");
         assert_eq!(report.net, dec("100"));
     }
 
@@ -1077,9 +1183,17 @@ mod db_tests {
             .await
             .expect("soft delete");
 
-        let report = report(&pool, &fx_cache(), alice, "EUR", "2026-01-01", "2026-01-31")
-            .await
-            .expect("report");
+        let report = report(
+            &pool,
+            &fx_cache(),
+            alice,
+            "EUR",
+            "2026-01-01",
+            "2026-01-31",
+            None,
+        )
+        .await
+        .expect("report");
         assert_eq!(report.net, dec("60"));
     }
 
@@ -1108,9 +1222,17 @@ mod db_tests {
             .await
             .expect("soft delete category");
 
-        let report = report(&pool, &fx_cache(), alice, "EUR", "2026-01-01", "2026-01-31")
-            .await
-            .expect("report");
+        let report = report(
+            &pool,
+            &fx_cache(),
+            alice,
+            "EUR",
+            "2026-01-01",
+            "2026-01-31",
+            None,
+        )
+        .await
+        .expect("report");
 
         assert_eq!(report.expense_lines.len(), 1);
         let line = &report.expense_lines[0];
@@ -1123,14 +1245,32 @@ mod db_tests {
     #[sqlx::test]
     async fn an_unknown_display_currency_is_rejected(pool: PgPool) {
         let alice = create_user(&pool, "alice@example.test").await;
-        let denied = report(&pool, &fx_cache(), alice, "ZZZ", "2026-01-01", "2026-01-31").await;
+        let denied = report(
+            &pool,
+            &fx_cache(),
+            alice,
+            "ZZZ",
+            "2026-01-01",
+            "2026-01-31",
+            None,
+        )
+        .await;
         assert!(matches!(denied, Err(IncomeExpenseError::CurrencyNotFound)));
     }
 
     #[sqlx::test]
     async fn a_reversed_period_is_rejected(pool: PgPool) {
         let alice = create_user(&pool, "alice@example.test").await;
-        let denied = report(&pool, &fx_cache(), alice, "EUR", "2026-02-01", "2026-01-01").await;
+        let denied = report(
+            &pool,
+            &fx_cache(),
+            alice,
+            "EUR",
+            "2026-02-01",
+            "2026-01-01",
+            None,
+        )
+        .await;
         assert!(matches!(
             denied,
             Err(IncomeExpenseError::InvalidInput(
@@ -1159,9 +1299,17 @@ mod db_tests {
 
         // No USD -> EUR rate cached -> the line is unvalued, report incomplete.
         let cache = FxRateCache::new().expect("cache");
-        let incomplete = report(&pool, &cache, alice, "EUR", "2026-06-01", "2026-06-30")
-            .await
-            .expect("report");
+        let incomplete = report(
+            &pool,
+            &cache,
+            alice,
+            "EUR",
+            "2026-06-01",
+            "2026-06-30",
+            None,
+        )
+        .await
+        .expect("report");
         assert!(!incomplete.complete);
         assert_eq!(incomplete.expense_lines.len(), 1);
         assert_eq!(incomplete.expense_lines[0].converted_net, None);
@@ -1172,9 +1320,17 @@ mod db_tests {
             DateTime::<Utc>::from_naive_utc_and_offset(booking.and_hms_opt(0, 0, 0).unwrap(), Utc);
         cache.seed("USD", booking, as_of, &[("EUR", "0.8")]);
 
-        let complete = report(&pool, &cache, alice, "EUR", "2026-06-01", "2026-06-30")
-            .await
-            .expect("report");
+        let complete = report(
+            &pool,
+            &cache,
+            alice,
+            "EUR",
+            "2026-06-01",
+            "2026-06-30",
+            None,
+        )
+        .await
+        .expect("report");
         assert!(complete.complete);
         // -50 USD * 0.8 EUR/USD -> -40.00 EUR.
         assert_eq!(complete.expense_lines[0].converted_net, Some(dec("-40.00")));

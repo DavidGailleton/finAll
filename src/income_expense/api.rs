@@ -44,6 +44,7 @@ pub async fn income_expense_report(
         &display_currency_code,
         &from,
         &to,
+        None,
     )
     .await?;
 
