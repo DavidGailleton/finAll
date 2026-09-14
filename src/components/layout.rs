@@ -8,6 +8,7 @@ use crate::auth::api::Logout;
 use crate::auth::types::SessionUser;
 use crate::balances::api::account_balance;
 use crate::components::{Icon, Money, ThemeToggle};
+use crate::pages::server_error_message;
 
 /// App shell for authenticated pages, matched to Sure: a skip link, an 84px
 /// icon rail, the accounts sidebar (groups by type, per-row balances), and the
@@ -136,8 +137,9 @@ fn AccountsSidebar() -> impl IntoView {
                 accounts
                     .get()
                     .map(|result| match result {
-                        Err(_) => {
-                            view! { <p class="field-note">"Accounts unavailable"</p> }.into_any()
+                        Err(err) => {
+                            view! { <p class="field-note">{server_error_message(&err)}</p> }
+                                .into_any()
                         }
                         Ok(list) if list.is_empty() => {
                             view! {
@@ -242,7 +244,11 @@ fn SidebarAccountRow(account: AccountDto, icon: &'static str) -> impl IntoView {
                                     .into_any()
                             }
                             Err(_) => {
-                                view! { <span class="acct-row__bal field-note">"—"</span> }
+                                view! {
+                                    <span class="acct-row__bal field-note">
+                                        "balance unavailable"
+                                    </span>
+                                }
                                     .into_any()
                             }
                         })

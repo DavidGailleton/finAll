@@ -32,6 +32,7 @@ const THEME_SCRIPT: &str = r#"(function(){
     try{if(t==='system')localStorage.removeItem('theme');else localStorage.theme=t}catch(e){}
     apply(t);marks(t);
   };
+  window.__markTheme=function(){marks(saved())};
   document.addEventListener('DOMContentLoaded',function(){marks(saved())});
 })();"#;
 

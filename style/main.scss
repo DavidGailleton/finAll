@@ -119,6 +119,10 @@
 	--shadow-md: 0 4px 8px -2px rgba(11, 11, 11, 0.06);
 	--shadow-lg: 0 12px 16px -4px rgba(11, 11, 11, 0.06);
 
+	// Motion — stronger than the CSS keyword `ease-out`, reused by every
+	// transition/animation in this file instead of hardcoding a curve inline.
+	--ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+
 	color-scheme: light;
 }
 
@@ -268,7 +272,7 @@ button {
 	color: var(--text-inverse);
 	border-radius: var(--radius-md);
 	transform: translateY(-150%);
-	transition: transform 0.15s ease;
+	transition: transform 0.15s var(--ease-out);
 }
 
 .skip-link:focus {
@@ -442,11 +446,18 @@ button {
 	width: 2rem;
 	height: 2rem;
 	border-radius: var(--radius-md);
+	transition: background 0.12s var(--ease-out), transform 0.1s var(--ease-out);
 }
 
-.rail-link:hover .rail-link__chip {
-	background: var(--surface-hover);
-	color: var(--text-primary);
+@media (hover: hover) and (pointer: fine) {
+	.rail-link:hover .rail-link__chip {
+		background: var(--surface-hover);
+		color: var(--text-primary);
+	}
+}
+
+.rail-link:active .rail-link__chip {
+	transform: scale(0.93);
 }
 
 .rail-link__label {
@@ -517,12 +528,18 @@ button {
 	display: none;
 }
 
-.acct-group > summary:hover {
+@media (hover: hover) and (pointer: fine) {
+	.acct-group > summary:hover {
+		background: var(--surface-hover);
+	}
+}
+
+.acct-group > summary:active {
 	background: var(--surface-hover);
 }
 
 .acct-group > summary .icon {
-	transition: transform 0.15s ease;
+	transition: transform 0.15s var(--ease-out);
 }
 
 .acct-group[open] > summary .icon--chev {
@@ -544,9 +561,16 @@ button {
 	border-radius: var(--radius-md);
 	text-decoration: none;
 	color: var(--text-primary);
+	transition: background 0.12s var(--ease-out);
 }
 
-.acct-row:hover {
+@media (hover: hover) and (pointer: fine) {
+	.acct-row:hover {
+		background: var(--surface-hover);
+	}
+}
+
+.acct-row:active {
 	background: var(--surface-hover);
 }
 
@@ -720,8 +744,10 @@ button {
 	text-decoration: none;
 }
 
-.back-link:hover {
-	text-decoration: underline;
+@media (hover: hover) and (pointer: fine) {
+	.back-link:hover {
+		text-decoration: underline;
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -828,10 +854,13 @@ button {
 	align-items: center;
 	gap: var(--s3);
 	padding: var(--s4);
+	transition: background 0.12s var(--ease-out);
 }
 
-.acct-list-row:hover {
-	background: var(--surface-hover);
+@media (hover: hover) and (pointer: fine) {
+	.acct-list-row:hover {
+		background: var(--surface-hover);
+	}
 }
 
 .acct-list-row__main {
@@ -847,8 +876,10 @@ button {
 	text-decoration: none;
 }
 
-.acct-list-row__main a:hover {
-	text-decoration: underline;
+@media (hover: hover) and (pointer: fine) {
+	.acct-list-row__main a:hover {
+		text-decoration: underline;
+	}
 }
 
 .acct-list-row__sub {
@@ -1273,8 +1304,10 @@ details.data-detail[open] > summary {
 	border-bottom: 0;
 }
 
-.data-table tbody tr:hover td {
-	background: var(--surface-hover);
+@media (hover: hover) and (pointer: fine) {
+	.data-table tbody tr:hover td {
+		background: var(--surface-hover);
+	}
 }
 
 .data-table .num {
@@ -1392,12 +1425,17 @@ details.data-detail[open] > summary {
 	align-items: center;
 	gap: var(--s3);
 	font-size: var(--fs-sm);
-	transition: background 0.12s ease;
+	transition: background 0.12s var(--ease-out);
 }
 
-.txn-row:hover,
 .txn-row--editing {
 	background: var(--surface-hover);
+}
+
+@media (hover: hover) and (pointer: fine) {
+	.txn-row:hover {
+		background: var(--surface-hover);
+	}
 }
 
 .txn-row__open {
@@ -1413,6 +1451,10 @@ details.data-detail[open] > summary {
 	border: 0;
 	border-radius: var(--radius-sm);
 	cursor: pointer;
+}
+
+.txn-row__open:active {
+	background: var(--container-inset-hover);
 }
 
 .txn-row__open:focus-visible {
@@ -1526,17 +1568,20 @@ details.data-detail[open] > summary {
 	background: var(--container-inset);
 }
 
-.txn-empty {
+// A full-block empty state (centred, generously padded), layered on top of
+// the shared `.empty-state` colour so every "nothing here yet" message uses
+// one base class; `.empty-state` alone stays a plain inline note (e.g. a
+// missing value inside a table cell) where this layout would break.
+.empty-state--block {
 	display: flex;
 	flex-direction: column;
 	align-items: center;
 	gap: var(--s1);
 	padding: var(--s7) var(--s4);
-	color: var(--text-secondary);
 	text-align: center;
 }
 
-.txn-empty strong {
+.empty-state--block strong {
 	color: var(--text-primary);
 	font-weight: 500;
 }
@@ -1576,11 +1621,18 @@ details.data-detail[open] > summary {
 	border: 1px solid transparent;
 	border-radius: var(--radius-md);
 	cursor: pointer;
-	transition: background 0.12s ease, filter 0.12s ease;
+	transition: background 0.12s var(--ease-out), filter 0.12s var(--ease-out),
+		transform 0.1s var(--ease-out);
 }
 
-.btn:hover {
-	background: var(--inverse-hover);
+@media (hover: hover) and (pointer: fine) {
+	.btn:hover {
+		background: var(--inverse-hover);
+	}
+}
+
+.btn:active {
+	transform: scale(0.97);
 }
 
 .btn:disabled {
@@ -1588,13 +1640,19 @@ details.data-detail[open] > summary {
 	cursor: not-allowed;
 }
 
+.btn:disabled:active {
+	transform: none;
+}
+
 .btn--secondary {
 	color: var(--text-primary);
 	background: var(--btn-secondary-bg);
 }
 
-.btn--secondary:hover {
-	background: var(--btn-secondary-bg-hover);
+@media (hover: hover) and (pointer: fine) {
+	.btn--secondary:hover {
+		background: var(--btn-secondary-bg-hover);
+	}
 }
 
 .btn--outline {
@@ -1603,8 +1661,10 @@ details.data-detail[open] > summary {
 	border-color: var(--border-secondary);
 }
 
-.btn--outline:hover {
-	background: var(--surface-hover);
+@media (hover: hover) and (pointer: fine) {
+	.btn--outline:hover {
+		background: var(--surface-hover);
+	}
 }
 
 .btn--ghost {
@@ -1612,8 +1672,10 @@ details.data-detail[open] > summary {
 	background: transparent;
 }
 
-.btn--ghost:hover {
-	background: var(--container-inset-hover);
+@media (hover: hover) and (pointer: fine) {
+	.btn--ghost:hover {
+		background: var(--container-inset-hover);
+	}
 }
 
 .btn--danger {
@@ -1621,9 +1683,11 @@ details.data-detail[open] > summary {
 	background: var(--destructive-fill);
 }
 
-.btn--danger:hover {
-	background: var(--destructive-fill);
-	filter: brightness(0.9);
+@media (hover: hover) and (pointer: fine) {
+	.btn--danger:hover {
+		background: var(--destructive-fill);
+		filter: brightness(0.9);
+	}
 }
 
 .btn--small {
@@ -1641,9 +1705,11 @@ details.data-detail[open] > summary {
 	background: transparent;
 }
 
-.btn--icon:hover {
-	color: var(--text-primary);
-	background: var(--container-inset-hover);
+@media (hover: hover) and (pointer: fine) {
+	.btn--icon:hover {
+		color: var(--text-primary);
+		background: var(--container-inset-hover);
+	}
 }
 
 .row-actions .btn--small {
@@ -1675,7 +1741,7 @@ details.data-detail[open] > summary {
 	border: 1px solid var(--field-border);
 	border-radius: var(--radius-sm);
 	box-shadow: var(--shadow-xs);
-	transition: box-shadow 0.2s ease, border-color 0.2s ease;
+	transition: box-shadow 0.2s var(--ease-out), border-color 0.2s var(--ease-out);
 }
 
 .field:focus-within {
@@ -1831,12 +1897,17 @@ legend {
 	font-size: var(--fs-sm);
 	white-space: nowrap;
 	cursor: pointer;
+	transition: transform 0.1s var(--ease-out);
 }
 
 .period-picker__option[aria-pressed="true"] {
 	background: var(--container);
 	color: var(--text-primary);
 	box-shadow: var(--shadow-xs);
+}
+
+.period-picker__option:active:not(:disabled) {
+	transform: scale(0.95);
 }
 
 .period-picker__option:disabled {
@@ -1887,7 +1958,13 @@ legend {
 	cursor: pointer;
 }
 
-.menu__item:hover {
+@media (hover: hover) and (pointer: fine) {
+	.menu__item:hover {
+		background: var(--container-hover);
+	}
+}
+
+.menu__item:active {
 	background: var(--container-hover);
 }
 
@@ -1959,12 +2036,17 @@ legend {
 	background: transparent;
 	color: var(--text-secondary);
 	cursor: pointer;
+	transition: transform 0.1s var(--ease-out);
 }
 
 .theme-toggle button[aria-pressed="true"] {
 	background: var(--container);
 	color: var(--text-primary);
 	box-shadow: var(--shadow-xs);
+}
+
+.theme-toggle button:active {
+	transform: scale(0.9);
 }
 
 // ---------------------------------------------------------------------------

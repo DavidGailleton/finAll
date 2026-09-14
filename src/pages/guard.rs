@@ -13,7 +13,9 @@ pub fn GuestOnly(children: ChildrenFn) -> impl IntoView {
     let session = Resource::new(|| (), |_| async move { current_user().await });
 
     view! {
-        <Suspense fallback=|| ()>
+        <Suspense fallback=|| {
+            view! { <p class="loading">"Loading…"</p> }
+        }>
             {move || {
                 session
                     .get()
@@ -40,7 +42,9 @@ pub fn RequireAuth(children: ChildrenFn) -> impl IntoView {
     let session = Resource::new(|| (), |_| async move { current_user().await });
 
     view! {
-        <Suspense fallback=|| ()>
+        <Suspense fallback=|| {
+            view! { <p class="loading">"Loading…"</p> }
+        }>
             {move || {
                 session
                     .get()

@@ -40,5 +40,10 @@ pub fn ThemeToggle() -> impl IntoView {
                 <Icon name="monitor" size="sm" />
             </button>
         </div>
+        // Corrects the `aria-pressed="false"` placeholders above as soon as this
+        // markup is parsed -- a script here runs immediately in document order,
+        // well before `DOMContentLoaded` (kept in THEME_SCRIPT as a fallback),
+        // so the saved theme's button is marked pressed with no perceptible delay.
+        <script inner_html="if(window.__markTheme)window.__markTheme();" />
     }
 }

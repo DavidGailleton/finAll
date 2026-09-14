@@ -207,6 +207,11 @@ pub fn LedgerTable(
     let extra = RwSignal::new(Vec::<TransactionDto>::new());
     let next_cursor = RwSignal::new(None::<String>);
     let more_cursor = RwSignal::new(None::<String>);
+    let more_error = RwSignal::new(None::<String>);
+    // `Resource` has no built-in pending signal (unlike `Action`), so track the
+    // in-flight "Load more" fetch by hand: set on click, cleared once the
+    // effect below observes either outcome.
+    let more_loading = RwSignal::new(false);
 
     let more_page = Resource::new(
         move || {
@@ -241,13 +246,21 @@ pub fn LedgerTable(
         }
     });
 
-    // A "Load more" fetch returned: append its rows, advance the cursor.
-    Effect::new(move |_| {
-        if let Some(Ok(Some(page))) = more_page.get() {
+    // A "Load more" fetch returned: append its rows, advance the cursor, or
+    // (on failure) surface a retryable error instead of silently doing nothing.
+    Effect::new(move |_| match more_page.get() {
+        Some(Ok(Some(page))) => {
+            more_error.set(None);
+            more_loading.set(false);
             let mut rows = page.transactions;
             extra.update(|existing| existing.append(&mut rows));
             next_cursor.set(page.next_cursor);
         }
+        Some(Err(err)) => {
+            more_error.set(Some(server_error_message(&err)));
+            more_loading.set(false);
+        }
+        _ => {}
     });
 
     view! {
@@ -268,7 +281,7 @@ pub fn LedgerTable(
                                 rows.extend(extra.get());
                                 if rows.is_empty() {
                                     return view! {
-                                        <p class="txn-empty">
+                                        <p class="empty-state empty-state--block">
                                             <strong>"No transactions yet"</strong>
                                             "Use \u{201C}Add transaction\u{201D} above to record the first one."
                                         </p>
@@ -339,10 +352,24 @@ pub fn LedgerTable(
                             <button
                                 type="button"
                                 class="btn btn--secondary txn-list__more"
-                                on:click=move |_| more_cursor.set(Some(cursor.clone()))
+                                disabled=move || more_loading.get()
+                                on:click=move |_| {
+                                    more_loading.set(true);
+                                    if more_error.get().is_some() {
+                                        more_error.set(None);
+                                        more_page.refetch();
+                                    } else {
+                                        more_cursor.set(Some(cursor.clone()));
+                                    }
+                                }
                             >
                                 "Load more"
                             </button>
+                            {move || {
+                                more_error
+                                    .get()
+                                    .map(|msg| view! { <p class="form-error">{msg}</p> })
+                            }}
                         }
                     })
             }}
@@ -659,6 +686,7 @@ fn PairedTransactionField(
                                         id="paired_transaction"
                                         aria-describedby="paired_transaction_hint"
                                         prop:value=selected.clone()
+                                        disabled=move || link.pending().get() || unlink.pending().get()
                                         on:change=move |ev| {
                                             let picked = event_target_value(&ev);
                                             if picked.is_empty() {
@@ -1129,6 +1157,10 @@ pub fn ImportTransactionsForm(
 ) -> impl IntoView {
     let importing = RwSignal::new(false);
     let file_error = RwSignal::new(None::<String>);
+    // True from file selection until the client-side read finishes (success or
+    // failure); `action.pending()` covers the server round-trip after that, so
+    // together they span the whole "user picked a file" -> "result is shown" gap.
+    let reading = RwSignal::new(false);
 
     let error = Signal::derive(move || {
         file_error.get().or_else(|| match action.value().get() {
@@ -1163,6 +1195,7 @@ pub fn ImportTransactionsForm(
                         id="import_file"
                         type="file"
                         accept=".csv,text/csv"
+                        disabled=move || reading.get() || action.pending().get()
                         on:change={
                             let account_id = account_id.clone();
                             move |_ev| {
@@ -1173,17 +1206,21 @@ pub fn ImportTransactionsForm(
                                     if let Some(file) = input.files().and_then(|files| files.get(0))
                                     {
                                         let account_id = account_id.clone();
+                                        reading.set(true);
                                         read_file_as_text(
                                             file,
-                                            move |result| match result {
-                                                Ok(csv_content) => {
-                                                    action
-                                                        .dispatch(ImportTransactions {
-                                                            account_id,
-                                                            csv_content,
-                                                        });
+                                            move |result| {
+                                                reading.set(false);
+                                                match result {
+                                                    Ok(csv_content) => {
+                                                        action
+                                                            .dispatch(ImportTransactions {
+                                                                account_id,
+                                                                csv_content,
+                                                            });
+                                                    }
+                                                    Err(message) => file_error.set(Some(message)),
                                                 }
-                                                Err(message) => file_error.set(Some(message)),
                                             },
                                         );
                                     }
@@ -1200,6 +1237,10 @@ pub fn ImportTransactionsForm(
                         }
                     />
                 </div>
+                {move || {
+                    (reading.get() || action.pending().get())
+                        .then(|| view! { <p class="field-note" aria-live="polite">"Importing…"</p> })
+                }}
                 <FormError message=error />
                 {move || {
                     action
