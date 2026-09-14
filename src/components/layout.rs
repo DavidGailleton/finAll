@@ -216,10 +216,18 @@ fn SidebarAccountRow(account: AccountDto, icon: &'static str) -> impl IntoView {
     let name = account.account_name.clone();
     let label = account.account_type.label();
 
-    let balance = Resource::new(
-        move || account_id.clone(),
-        |id| async move { account_balance(id).await },
-    );
+    // `LocalResource`, not `Resource`: this row sits inside a list that is
+    // itself inside a `<Suspense>` (`AccountsSidebar`), and giving every row
+    // its own server-rendered `Resource` here caused the SSR streaming
+    // machinery to re-render the row list mid-resolution, registering each
+    // row's balance resource more than once -- the client then found more
+    // hydration markers than there were matching DOM nodes and panicked. A
+    // `LocalResource` never runs (or serializes) during SSR, so there is
+    // nothing to desync; the balance simply loads client-side once hydrated.
+    let balance = LocalResource::new(move || {
+        let id = account_id.clone();
+        async move { account_balance(id).await }
+    });
 
     view! {
         <A href=href attr:class="acct-row">
