@@ -37,7 +37,7 @@ pub fn IncomeExpenseBars(
             <div class="ie-bars__group">
                 <div class="ie-bars__head">
                     <span class="label">"Income"</span>
-                    <Money amount=income code=code.clone() />
+                    <Money amount=income code=code.clone() decimals=2 />
                 </div>
                 <div class="ie-bars__track" aria-hidden="true">
                     <div
@@ -49,7 +49,7 @@ pub fn IncomeExpenseBars(
             <div class="ie-bars__group">
                 <div class="ie-bars__head">
                     <span class="label">"Expenses"</span>
-                    <Money amount=expense code=code />
+                    <Money amount=expense code=code decimals=2 />
                 </div>
                 <div class="ie-bars__track" aria-hidden="true">
                     <div

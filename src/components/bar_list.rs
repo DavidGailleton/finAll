@@ -52,7 +52,7 @@ pub fn BarList(rows: Vec<BarRow>) -> impl IntoView {
                         <span class=fill_class style=format!("width:{pct:.1}%")></span>
                     </span>
                     <span class="barlist__value">
-                        <Money amount=row.amount code=row.code />
+                        <Money amount=row.amount code=row.code decimals=2 />
                     </span>
                 </li>
             }

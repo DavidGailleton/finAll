@@ -580,11 +580,16 @@ button {
 }
 
 .acct-row__main {
+	display: grid;
+	grid-template-columns: minmax(0, 1fr) auto;
+	column-gap: var(--s2);
 	min-width: 0;
 	flex: 1;
 }
 
 .acct-row__name {
+	grid-column: 1;
+	grid-row: 1;
 	font-size: var(--fs-sm);
 	font-weight: 500;
 	white-space: nowrap;
@@ -593,6 +598,8 @@ button {
 }
 
 .acct-row__sub {
+	grid-column: 1;
+	grid-row: 2;
 	font-size: var(--fs-sm);
 	color: var(--text-secondary);
 	white-space: nowrap;
@@ -601,11 +608,13 @@ button {
 }
 
 .acct-row__bal {
+	grid-column: 2;
+	grid-row: 1;
+	align-self: start;
 	font-size: var(--fs-sm);
 	font-weight: 500;
 	white-space: nowrap;
 	text-align: right;
-	flex-shrink: 0;
 }
 
 // --- main ---

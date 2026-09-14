@@ -239,29 +239,35 @@ fn SidebarAccountRow(account: AccountDto, icon: &'static str) -> impl IntoView {
             </span>
             <span class="acct-row__main">
                 <span class="acct-row__name">{name}</span>
+                {move || {
+                    match balance.get() {
+                        None => {
+                            view! { <span class="acct-row__bal loading">"…"</span> }.into_any()
+                        }
+                        Some(Ok(balance)) => {
+                            view! {
+                                <span class="acct-row__bal">
+                                    <Money
+                                        amount=balance.amount
+                                        code=balance.currency_code
+                                        decimals=2
+                                    />
+                                </span>
+                            }
+                                .into_any()
+                        }
+                        Some(Err(_)) => {
+                            view! {
+                                <span class="acct-row__bal field-note">
+                                    "balance unavailable"
+                                </span>
+                            }
+                                .into_any()
+                        }
+                    }
+                }}
                 <span class="acct-row__sub">{label}</span>
             </span>
-            {move || {
-                match balance.get() {
-                    None => {
-                        view! { <span class="acct-row__bal loading">"…"</span> }.into_any()
-                    }
-                    Some(Ok(balance)) => {
-                        view! {
-                            <span class="acct-row__bal">
-                                <Money amount=balance.amount code=balance.currency_code />
-                            </span>
-                        }
-                            .into_any()
-                    }
-                    Some(Err(_)) => {
-                        view! {
-                            <span class="acct-row__bal field-note">"balance unavailable"</span>
-                        }
-                            .into_any()
-                    }
-                }
-            }}
         </A>
     }
 }

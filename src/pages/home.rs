@@ -133,6 +133,7 @@ fn Dashboard() -> impl IntoView {
                                                     <Money
                                                         amount=report.total
                                                         code=report.display_currency_code
+                                                        decimals=2
                                                         figure=true
                                                     />
                                                 }
@@ -149,7 +150,7 @@ fn Dashboard() -> impl IntoView {
                                     let tone = if net.starts_with('-') { "down" } else { "up" };
                                     view! {
                                         <Pill tone=tone>
-                                            <Money amount=net code=code signed=true />
+                                            <Money amount=net code=code decimals=2 signed=true />
                                             " net this period"
                                         </Pill>
                                     }
@@ -416,7 +417,7 @@ fn NetWorthBody(report: NetWorthReportDto) -> impl IntoView {
                 <section class="stack">
                     <div class="cluster">
                         <h3>{classification.label()}</h3>
-                        <Money amount=total code=heading_code />
+                        <Money amount=total code=heading_code decimals=2 />
                     </div>
                     <BarList rows=bar_rows />
                     {groups_view}
@@ -479,14 +480,17 @@ fn account_group_view(
                 <tr>
                     <td>{line.account_name}</td>
                     <td class="num">
-                        <Money amount=balance_amount code=balance_code />
+                        <Money amount=balance_amount code=balance_code decimals=2 />
                     </td>
                     <td class="num">{rate}</td>
                     <td class="date">{rate_date}</td>
                     <td class="num">
                         {match converted {
                             Some(amount) => {
-                                view! { <Money amount=amount code=value_code /> }.into_any()
+                                view! {
+                                    <Money amount=amount code=value_code decimals=2 />
+                                }
+                                    .into_any()
                             }
                             None => {
                                 view! { <span class="empty-state">"not available"</span> }.into_any()
@@ -502,7 +506,7 @@ fn account_group_view(
         <details class="data-detail">
             <summary>
                 {account_type.label()} " · "
-                <Money amount=total code=display_code.to_owned() />
+                <Money amount=total code=display_code.to_owned() decimals=2 />
             </summary>
             <ScrollableTable caption=caption>
                 <thead>
@@ -578,7 +582,7 @@ fn MoneyFlowBody(report: MoneyFlowReportDto) -> impl IntoView {
 
         <div class="cluster">
             <Pill tone=net_tone>
-                <Money amount=net code=code signed=true />
+                <Money amount=net code=code decimals=2 signed=true />
                 " net"
             </Pill>
         </div>

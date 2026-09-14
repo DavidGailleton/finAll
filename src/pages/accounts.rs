@@ -193,7 +193,7 @@ fn AccountRow(account: AccountDto, icon: &'static str) -> impl IntoView {
                     Some(Ok(balance)) => {
                         view! {
                             <span class="acct-list-row__bal">
-                                <Money amount=balance.amount code=balance.currency_code />
+                                <Money amount=balance.amount code=balance.currency_code decimals=2 />
                             </span>
                         }
                             .into_any()
@@ -430,6 +430,7 @@ fn AccountDetail() -> impl IntoView {
                                                                     <Money
                                                                         amount=balance.amount
                                                                         code=balance.currency_code
+                                                                        decimals=2
                                                                         figure=true
                                                                     />
                                                                 }
