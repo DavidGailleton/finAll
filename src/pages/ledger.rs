@@ -11,8 +11,9 @@
 use leptos::prelude::*;
 
 use crate::accounts::api::list_accounts;
-use crate::accounts::types::AccountType;
+use crate::accounts::types::{AccountDto, AccountType};
 use crate::assets::currency::api::list_currencies;
+use crate::assets::currency::types::CurrencyDto;
 use crate::categories::api::list_categories;
 use crate::categories::types::CategoryDto;
 use crate::components::{Button, FormError, Icon, SelectField, TextField};
@@ -958,127 +959,20 @@ pub fn AddTransactionForm(
                                         .into_any()
                                 }
                                 Ok((currency_list, category_list, merchant_list, account_list)) => {
-                                    let accounts_for_change = account_list.clone();
                                     view! {
-                                        <ActionForm action=action>
-                                            {if has_fixed_account {
-                                                view! {
-                                                    <input
-                                                        type="hidden"
-                                                        name="account_id"
-                                                        prop:value=move || account_id.get()
-                                                    />
-                                                }
-                                                    .into_any()
-                                            } else {
-                                                view! {
-                                                    <div class="field">
-                                                        <label for="account_id">"Account"</label>
-                                                        <select
-                                                            id="account_id"
-                                                            name="account_id"
-                                                            prop:value=move || account_id.get()
-                                                            on:change=move |ev| {
-                                                                let picked = event_target_value(&ev);
-                                                                if let Some(account) = accounts_for_change
-                                                                    .iter()
-                                                                    .find(|account| account.id == picked)
-                                                                {
-                                                                    currency_id.set(account.default_asset_id.clone());
-                                                                    is_cash
-                                                                        .set(account.account_type == AccountType::Cash);
-                                                                }
-                                                                account_id.set(picked);
-                                                            }
-                                                        >
-                                                            <option value="">"Select an account"</option>
-                                                            {account_list
-                                                                .into_iter()
-                                                                .map(|account| {
-                                                                    view! {
-                                                                        <option value=account
-                                                                            .id>{account.account_name}</option>
-                                                                    }
-                                                                })
-                                                                .collect_view()}
-                                                        </select>
-                                                    </div>
-                                                }
-                                                    .into_any()
-                                            }}
-                                            <Show
-                                                when=move || is_cash.get()
-                                                fallback=|| {
-                                                    view! {
-                                                        <TextField
-                                                            label="Booking date"
-                                                            name="booking_date"
-                                                            input_type="date"
-                                                        />
-                                                        <TextField
-                                                            label="Value date"
-                                                            name="value_date"
-                                                            input_type="date"
-                                                            required=false
-                                                        />
-                                                    }
-                                                }
-                                            >
-                                                <TextField
-                                                    label="Date"
-                                                    name="booking_date"
-                                                    input_type="date"
-                                                />
-                                            </Show>
-                                            <TextField
-                                                label="Amount"
-                                                name="amount"
-                                                hint="Positive is money in, negative is money out."
-                                            />
-                                            <div class="field">
-                                                <label for="asset_id">"Currency"</label>
-                                                <select
-                                                    id="asset_id"
-                                                    name="asset_id"
-                                                    prop:value=move || currency_id.get()
-                                                    on:change=move |ev| currency_id.set(event_target_value(&ev))
-                                                >
-                                                    <option value="">"Select a currency"</option>
-                                                    {currency_list
-                                                        .into_iter()
-                                                        .map(|currency| {
-                                                            view! {
-                                                                <option value=currency.id>
-                                                                    {format!(
-                                                                        "{} — {}",
-                                                                        currency.alphabetic_code,
-                                                                        currency.currency_name,
-                                                                    )}
-                                                                </option>
-                                                            }
-                                                        })
-                                                        .collect_view()}
-                                                </select>
-                                            </div>
-                                            <CategoryMerchantFields
-                                                categories=category_list
-                                                merchants=merchant_list
-                                                category=String::new()
-                                                merchant=String::new()
-                                            />
-                                            <FormError message=error />
-                                            <div class="form-actions">
-                                                <Button pending=action
-                                                    .pending()>"Add transaction"</Button>
-                                                <button
-                                                    type="button"
-                                                    class="btn btn--secondary"
-                                                    on:click=move |_| adding.set(false)
-                                                >
-                                                    "Cancel"
-                                                </button>
-                                            </div>
-                                        </ActionForm>
+                                        <AddTransactionFields
+                                            action=action
+                                            has_fixed_account=has_fixed_account
+                                            adding=adding
+                                            account_id=account_id
+                                            currency_id=currency_id
+                                            is_cash=is_cash
+                                            error=error
+                                            currency_list=currency_list
+                                            category_list=category_list
+                                            merchant_list=merchant_list
+                                            account_list=account_list
+                                        />
                                     }
                                         .into_any()
                                 }
@@ -1087,6 +981,130 @@ pub fn AddTransactionForm(
                 </Suspense>
             </Show>
         </div>
+    }
+}
+
+#[component]
+fn AddTransactionFields(
+    action: ServerAction<CreateTransaction>,
+    has_fixed_account: bool,
+    adding: RwSignal<bool>,
+    account_id: RwSignal<String>,
+    currency_id: RwSignal<String>,
+    is_cash: RwSignal<bool>,
+    error: Signal<Option<String>>,
+    currency_list: Vec<CurrencyDto>,
+    category_list: Vec<CategoryDto>,
+    merchant_list: Vec<MerchantDto>,
+    account_list: Vec<AccountDto>,
+) -> impl IntoView {
+    let accounts_for_change = account_list.clone();
+
+    view! {
+        <ActionForm action=action>
+            {if has_fixed_account {
+                view! {
+                    <input type="hidden" name="account_id" prop:value=move || account_id.get() />
+                }
+                    .into_any()
+            } else {
+                view! {
+                    <div class="field">
+                        <label for="account_id">"Account"</label>
+                        <select
+                            id="account_id"
+                            name="account_id"
+                            prop:value=move || account_id.get()
+                            on:change=move |ev| {
+                                let picked = event_target_value(&ev);
+                                if let Some(account) = accounts_for_change
+                                    .iter()
+                                    .find(|account| account.id == picked)
+                                {
+                                    currency_id.set(account.default_asset_id.clone());
+                                    is_cash.set(account.account_type == AccountType::Cash);
+                                }
+                                account_id.set(picked);
+                            }
+                        >
+                            <option value="">"Select an account"</option>
+                            {account_list
+                                .into_iter()
+                                .map(|account| {
+                                    view! {
+                                        <option value=account.id>{account.account_name}</option>
+                                    }
+                                })
+                                .collect_view()}
+                        </select>
+                    </div>
+                }
+                    .into_any()
+            }}
+            <Show
+                when=move || is_cash.get()
+                fallback=|| {
+                    view! {
+                        <TextField label="Booking date" name="booking_date" input_type="date" />
+                        <TextField
+                            label="Value date"
+                            name="value_date"
+                            input_type="date"
+                            required=false
+                        />
+                    }
+                }
+            >
+                <TextField label="Date" name="booking_date" input_type="date" />
+            </Show>
+            <TextField
+                label="Amount"
+                name="amount"
+                hint="Positive is money in, negative is money out."
+            />
+            <div class="field">
+                <label for="asset_id">"Currency"</label>
+                <select
+                    id="asset_id"
+                    name="asset_id"
+                    prop:value=move || currency_id.get()
+                    on:change=move |ev| currency_id.set(event_target_value(&ev))
+                >
+                    <option value="">"Select a currency"</option>
+                    {currency_list
+                        .into_iter()
+                        .map(|currency| {
+                            view! {
+                                <option value=currency.id>
+                                    {format!(
+                                        "{} — {}",
+                                        currency.alphabetic_code,
+                                        currency.currency_name,
+                                    )}
+                                </option>
+                            }
+                        })
+                        .collect_view()}
+                </select>
+            </div>
+            <CategoryMerchantFields
+                categories=category_list
+                merchants=merchant_list
+                category=String::new()
+                merchant=String::new()
+            />
+            <FormError message=error />
+            <div class="form-actions">
+                <Button pending=action.pending()>"Add transaction"</Button>
+                <button
+                    type="button"
+                    class="btn btn--secondary"
+                    on:click=move |_| adding.set(false)
+                >
+                    "Cancel"
+                </button>
+            </div>
+        </ActionForm>
     }
 }
 
@@ -1186,103 +1204,120 @@ pub fn ImportTransactionsForm(
                     }
                 }
             >
-                <p class="field-note">
-                    "CSV columns: date (YYYY-MM-DD), amount, category, merchant. Category and merchant are optional and must match an existing name."
-                </p>
-                <div class="field">
-                    <label for="import_file">"CSV file"</label>
-                    <input
-                        id="import_file"
-                        type="file"
-                        accept=".csv,text/csv"
-                        disabled=move || reading.get() || action.pending().get()
-                        on:change={
-                            let account_id = account_id.clone();
-                            move |_ev| {
-                                file_error.set(None);
-                                #[cfg(feature = "hydrate")]
-                                {
-                                    let input: web_sys::HtmlInputElement = event_target(&_ev);
-                                    if let Some(file) = input.files().and_then(|files| files.get(0))
-                                    {
-                                        let account_id = account_id.clone();
-                                        reading.set(true);
-                                        read_file_as_text(
-                                            file,
-                                            move |result| {
-                                                reading.set(false);
-                                                match result {
-                                                    Ok(csv_content) => {
-                                                        action
-                                                            .dispatch(ImportTransactions {
-                                                                account_id,
-                                                                csv_content,
-                                                            });
-                                                    }
-                                                    Err(message) => file_error.set(Some(message)),
-                                                }
-                                            },
-                                        );
-                                    }
-                                    input.set_value("");
-                                }
-                                #[cfg(not(feature = "hydrate"))]
-                                {
-                                    // No `web_sys::File`/`FileReader` on the
-                                    // server target -- this input is inert
-                                    // during SSR.
-                                    let _ = &account_id;
-                                }
-                            }
-                        }
-                    />
-                </div>
-                {move || {
-                    (reading.get() || action.pending().get())
-                        .then(|| view! { <p class="field-note" aria-live="polite">"Importing…"</p> })
-                }}
-                <FormError message=error />
-                {move || {
-                    action
-                        .value()
-                        .get()
-                        .and_then(|result| result.ok())
-                        .map(|summary: ImportSummary| {
-                            view! {
-                                <p class="field-note">
-                                    {format!("Imported {} transaction(s).", summary.imported)}
-                                </p>
-                                {(!summary.rejected.is_empty())
-                                    .then(|| {
-                                        view! {
-                                            <ul class="import-rejections">
-                                                {summary
-                                                    .rejected
-                                                    .into_iter()
-                                                    .map(|row| {
-                                                        view! {
-                                                            <li>
-                                                                {format!("Row {}: {}", row.row_number, row.reason)}
-                                                            </li>
-                                                        }
-                                                    })
-                                                    .collect_view()}
-                                            </ul>
-                                        }
-                                    })}
-                            }
-                        })
-                }}
-                <button
-                    type="button"
-                    class="btn btn--secondary btn--small"
-                    on:click=move |_| importing.set(false)
-                >
-                    "Close"
-                </button>
+                <ImportTransactionsFields
+                    account_id=account_id.clone()
+                    action=action
+                    importing=importing
+                    file_error=file_error
+                    reading=reading
+                    error=error
+                />
             </Show>
         </div>
     }
+}
+
+#[component]
+fn ImportTransactionsFields(
+    account_id: String,
+    action: ServerAction<ImportTransactions>,
+    importing: RwSignal<bool>,
+    file_error: RwSignal<Option<String>>,
+    reading: RwSignal<bool>,
+    error: Signal<Option<String>>,
+) -> impl IntoView {
+    view! {
+        <p class="field-note">
+            "CSV columns: date (YYYY-MM-DD), amount, category, merchant. Category and merchant are optional and must match an existing name."
+        </p>
+        <div class="field">
+            <label for="import_file">"CSV file"</label>
+            <input
+                id="import_file"
+                type="file"
+                accept=".csv,text/csv"
+                disabled=move || reading.get() || action.pending().get()
+                on:change={
+                    let account_id = account_id.clone();
+                    move |_ev| {
+                        file_error.set(None);
+                        #[cfg(feature = "hydrate")]
+                        {
+                            let input: web_sys::HtmlInputElement = event_target(&_ev);
+                            if let Some(file) = input.files().and_then(|files| files.get(0)) {
+                                let account_id = account_id.clone();
+                                reading.set(true);
+                                read_file_as_text(
+                                    file,
+                                    move |result| {
+                                        reading.set(false);
+                                        match result {
+                                            Ok(csv_content) => {
+                                                action
+                                                    .dispatch(ImportTransactions {
+                                                        account_id,
+                                                        csv_content,
+                                                    });
+                                            }
+                                            Err(message) => file_error.set(Some(message)),
+                                        }
+                                    },
+                                );
+                            }
+                            input.set_value("");
+                        }
+                        #[cfg(not(feature = "hydrate"))]
+                        {
+                            // No `web_sys::File`/`FileReader` on the
+                            // server target -- this input is inert
+                            // during SSR.
+                            let _ = &account_id;
+                        }
+                    }
+                }
+            />
+        </div>
+        {move || {
+            (reading.get() || action.pending().get())
+                .then(|| view! { <p class="field-note" aria-live="polite">"Importing…"</p> })
+        }}
+        <FormError message=error />
+        {move || {
+            action
+                .value()
+                .get()
+                .and_then(|result| result.ok())
+                .map(|summary: ImportSummary| {
+                    view! {
+                        <p class="field-note">
+                            {format!("Imported {} transaction(s).", summary.imported)}
+                        </p>
+                        {(!summary.rejected.is_empty())
+                            .then(|| {
+                                view! {
+                                    <ul class="import-rejections">
+                                        {summary
+                                            .rejected
+                                            .into_iter()
+                                            .map(|row| {
+                                                view! {
+                                                    <li>
+                                                        {format!("Row {}: {}", row.row_number, row.reason)}
+                                                    </li>
+                                                }
+                                            })
+                                            .collect_view()}
+                                    </ul>
+                                }
+                            })}
+                    }
+                })
+        }}
+        <button type="button" class="btn btn--secondary btn--small" on:click=move |_| importing.set(false)>
+            "Close"
+        </button>
+    }
+        .into_any()
 }
 
 #[cfg(test)]
