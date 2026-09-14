@@ -7,6 +7,7 @@ use crate::accounts::types::{AccountDto, AccountType};
 use crate::auth::api::Logout;
 use crate::auth::types::SessionUser;
 use crate::balances::api::account_balance;
+use crate::balances::types::AccountBalanceDto;
 use crate::components::{Icon, Money, ThemeToggle};
 use crate::pages::server_error_message;
 
@@ -216,17 +217,27 @@ fn SidebarAccountRow(account: AccountDto, icon: &'static str) -> impl IntoView {
     let name = account.account_name.clone();
     let label = account.account_type.label();
 
-    // `LocalResource`, not `Resource`: this row sits inside a list that is
-    // itself inside a `<Suspense>` (`AccountsSidebar`), and giving every row
-    // its own server-rendered `Resource` here caused the SSR streaming
-    // machinery to re-render the row list mid-resolution, registering each
-    // row's balance resource more than once -- the client then found more
-    // hydration markers than there were matching DOM nodes and panicked. A
-    // `LocalResource` never runs (or serializes) during SSR, so there is
-    // nothing to desync; the balance simply loads client-side once hydrated.
-    let balance = LocalResource::new(move || {
+    // Neither `Resource` nor `LocalResource`+`<Suspense>`: this row sits
+    // inside a list that is itself inside a `<Suspense>` (`AccountsSidebar`).
+    // A per-row `Resource` there caused the SSR streaming machinery to
+    // re-render the row list mid-resolution, registering each row's balance
+    // resource more than once (duplicate hydration markers). Swapping to
+    // `LocalResource` avoided the duplication but a `<Suspense>` wrapping a
+    // synchronously-read `LocalResource` takes an SSR fast path that omits
+    // Suspense's own hydration marker comments entirely, so the client still
+    // panicked expecting a marker it never got. `Effect::new` sidesteps both:
+    // the `effects` feature (and therefore this effect) is only enabled by
+    // the `hydrate`/`csr` features, not `ssr` (see leptos's Cargo.toml), so
+    // this never runs during SSR at all -- the row renders the "loading"
+    // fallback plainly server-side with no Suspense/resource involvement,
+    // then the effect fetches and updates `balance` after hydration as an
+    // ordinary client-side reactive update.
+    let balance: RwSignal<Option<Result<AccountBalanceDto, ServerFnError>>> = RwSignal::new(None);
+    Effect::new(move |_| {
         let id = account_id.clone();
-        async move { account_balance(id).await }
+        leptos::task::spawn_local(async move {
+            balance.set(Some(account_balance(id).await));
+        });
     });
 
     view! {
@@ -238,30 +249,27 @@ fn SidebarAccountRow(account: AccountDto, icon: &'static str) -> impl IntoView {
                 <span class="acct-row__name">{name}</span>
                 <span class="acct-row__sub">{label}</span>
             </span>
-            <Suspense fallback=|| view! { <span class="acct-row__bal loading">"…"</span> }>
-                {move || {
-                    balance
-                        .get()
-                        .map(|result| match result {
-                            Ok(balance) => {
-                                view! {
-                                    <span class="acct-row__bal">
-                                        <Money amount=balance.amount code=balance.currency_code />
-                                    </span>
-                                }
-                                    .into_any()
-                            }
-                            Err(_) => {
-                                view! {
-                                    <span class="acct-row__bal field-note">
-                                        "balance unavailable"
-                                    </span>
-                                }
-                                    .into_any()
-                            }
-                        })
-                }}
-            </Suspense>
+            {move || {
+                match balance.get() {
+                    None => {
+                        view! { <span class="acct-row__bal loading">"…"</span> }.into_any()
+                    }
+                    Some(Ok(balance)) => {
+                        view! {
+                            <span class="acct-row__bal">
+                                <Money amount=balance.amount code=balance.currency_code />
+                            </span>
+                        }
+                            .into_any()
+                    }
+                    Some(Err(_)) => {
+                        view! {
+                            <span class="acct-row__bal field-note">"balance unavailable"</span>
+                        }
+                            .into_any()
+                    }
+                }
+            }}
         </A>
     }
 }
